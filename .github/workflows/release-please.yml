@@ -1,0 +1,27 @@
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+
+# contents: write — создание тегов/релизов; pull-requests: write и issues: write
+# — release-please ведёт "Release PR" с накопленным CHANGELOG и открывает его
+# через issues API.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # Встроенный GITHUB_TOKEN намеренно не может запускать другие workflow
+          # (защита GitHub от бесконечных циклов) — токен PAT со scope на этот
+          # репозиторий нужно завести человеку вручную и добавить секретом
+          # RELEASE_PLEASE_TOKEN (Settings → Secrets and variables → Actions),
+          # это НЕ делается ботом/агентом. См. README.md, раздел "Релизы".
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
