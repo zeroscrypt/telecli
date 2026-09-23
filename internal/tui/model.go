@@ -24,10 +24,16 @@ import (
 )
 
 const (
-	chatsLimit      = 50
-	messagesLimit   = 50
-	foldersPaneW    = 18 // ширина панели папок
-	chatsPaneW      = 30
+	chatsLimit    = 50
+	messagesLimit = 50
+	foldersPaneW  = 18 // ширина панели папок
+	chatsPaneW    = 30
+	// collapsedPaneContentW — ширина содержимого свёрнутой панели: "[N]" —
+	// ровно 3 колонки: '[', цифра, ']'.
+	collapsedPaneContentW = 3
+	// collapsedPaneW — полная ширина свёрнутой панели: контент + рамка(2) +
+	// паддинг, тот же приём, что у contentW в foldersPane/chatPane.
+	collapsedPaneW  = collapsedPaneContentW + 2 + 2*panePaddingH
 	paneTitleHeight = 1 // одна строка над каждой панелью — не часть рамки, не часть скроллящегося контента viewport
 	statusReserve   = 1 // строка статуса/ошибки внизу экрана
 	// composeAreaHeight — МИНИМАЛЬНАЯ высота textarea черновика в
@@ -77,6 +83,10 @@ const (
 	// Normal по Esc или повторному ShowHelp — тот же принцип toggle, что и у
 	// остальных модальных оверлеев (modeCommand/modeSearch).
 	modeHelp
+	// modeAbout — полноэкранный оверлей «о программе» (хоткей About,
+	// по умолчанию "t"). Из Normal, закрывается назад в Normal по Esc или
+	// повторному About — тот же принцип toggle, что и у modeHelp.
+	modeAbout
 	// modeConfirmDelete — двухшаговое подтверждение удаления/покидания чата
 	// (hotkey DeleteChat, по умолчанию "d"). Группу/канал можно только покинуть
 	// (один шаг подтверждения), личный/секретный чат — удалить, с выбором
@@ -167,6 +177,16 @@ type chatReadInboxUpdateMsg struct {
 	closed      bool
 }
 
+// chatReadOutboxUpdateMsg — один апдейт из client.ChatReadOutboxUpdates(),
+// последний прочитанный ID исходящего сообщения в чате. valid/closed — тот же
+// контракт, что у chatReadInboxUpdateMsg.
+type chatReadOutboxUpdateMsg struct {
+	chatID                  int64
+	lastReadOutboxMessageID int64
+	valid                   bool
+	closed                  bool
+}
+
 // unreadCountUpdateMsg — один апдейт из client.UnreadCountUpdates(),
 // СУММА НЕПРОЧИТАННЫХ СООБЩЕНИЙ по ЦЕЛОМУ списку чатов. В Update()
 // применяется ТОЛЬКО для folderID == 0 ("Все чаты"/Main) — для остальных
@@ -211,6 +231,10 @@ type updateInstallMsg struct {
 	err     error
 }
 
+// aboutTickMsg — сообщение для анимации «бегущего блика» на экране «о программе».
+// Содержит текущую колонку блика (0-based). Обрабатывается только в modeAbout.
+type aboutTickMsg int
+
 // Model — bubbletea-модель основного экрана: папки слева, список чатов
 // выбранной папки в центре, лента сообщений выбранного чата справа. Ввод —
 // vim-модальный, биндинги читаются из конфигурации (config.KeyBindings); из
@@ -235,16 +259,23 @@ type Model struct {
 	chats      []auth.Chat
 	chatCursor int
 
-	messages      []auth.Message
-	loadingMsgs   bool
-	sendingMsg    bool
-	sendingFile   bool
-	displayedChat int64 // id чата, чья лента отображается/грузится
+	messages       []auth.Message
+	loadingMsgs    bool
+	sendingMsg     bool
+	sendingFile    bool
+	displayedChat  int64           // id чата, чья лента отображается/грузится
+	chatReadOutbox map[int64]int64 // chatID -> last_read_outbox_message_id
 
 	messageCursor int // индекс в m.messages: какое сообщение выбрано в focusMessages
 
-	focus    focus
-	viewport viewport.Model
+	focus focus
+	// foldersCollapsed/chatsCollapsed — панели 1 (папки) и 2 (чаты) свёрнуты
+	// в узкую вертикальную колонку (переключается повторным нажатием своей
+	// цифры при уже установленном фокусе). Панель 3 (сообщения) не
+	// сворачивается никогда. Zero value false = развёрнуто.
+	foldersCollapsed bool
+	chatsCollapsed   bool
+	viewport         viewport.Model
 	// paneRowHeight — общий бюджет высоты строк для ВСЕХ ТРЁХ панелей
 	// (папки/чаты/сообщения), одинаковый для всех. m.viewport.Height —
 	// ОТДЕЛЬНОЕ поле: высота именно вьюпорта сообщений, обычно равна
@@ -283,12 +314,32 @@ type Model struct {
 	deleteTargetTitle  string
 	deleteTargetGroup  bool // true — группа/канал (leaveChat), false — личный чат (deleteChatHistory)
 	deleteStep         int  // 0 — "покинуть/удалить?", 1 — "также у собеседника?" (только для НЕ группы)
+
+	// Состояние анимации «бегущего блика» на экране «о программе» (modeAbout).
+	// aboutTickCol — текущая колонка блика в итоговом баннере (0-based).
+	// Сбрасывается при входе в modeAbout, не переподписывается при выходе.
+	aboutTickCol int
 }
 
 // New создаёт модель с пустым viewport: до первого tea.WindowSizeMsg у нас нет
 // размеров терминала, их пересчитываем в Update. Рамка viewport задаётся через
 // Style — сам viewport учитывает её при расчёте полезной области. Поля ввода
 // создаются расфокусированными и фокусируются при входе в соответствующий режим.
+// chromeInputStyles — сплошной чёрный фон листовых стилей однострочных полей
+// нижней строки (командная строка, путь файла, поиск): сами поля живут на
+// сплошном чёрном фоне нижней области (см. bottomLine/chromeBackground, 0039),
+// а без фона на собственных листовых стилях их фрагменты (промпт, текст,
+// плейсхолдер, хвостовая доливка до ширины) сбрасывали бы черноту собственными
+// \x1b[0m — тот же механизм, что у карточек сообщений (см. messagePanelBg).
+func chromeInputStyles(in textinput.Model) textinput.Model {
+	in.PromptStyle = in.PromptStyle.Background(chromeBackground)
+	in.TextStyle = in.TextStyle.Background(chromeBackground)
+	in.PlaceholderStyle = in.PlaceholderStyle.Background(chromeBackground)
+	in.CompletionStyle = in.CompletionStyle.Background(chromeBackground)
+	in.Cursor.TextStyle = in.Cursor.TextStyle.Background(chromeBackground)
+	return in
+}
+
 func New(client auth.TDClientInterface, ctx context.Context, keys config.KeyBindings, settings config.Settings, version string) Model {
 	vp := viewport.New(0, 0)
 	// paneBorderStyle(false), не голый Border(...): m.viewport.Style должен
@@ -311,18 +362,28 @@ func New(client auth.TDClientInterface, ctx context.Context, keys config.KeyBind
 	// PLAN.md, архитектурные ограничения), отличающий её от строки черновика
 	// в Insert-режиме (у той остаётся дефолтный "┃ " от textarea.New()).
 	commandInput.Prompt = ":"
+	commandInput = chromeInputStyles(commandInput)
 
 	fileInput := textinput.New()
 	// Промпт однострочного поля пути к файлу (режим modeFile, ctrl+f) —
 	// отдельный от ":" командной строки и от черновика Insert-режима.
 	fileInput.Prompt = "Файл: "
+	fileInput = chromeInputStyles(fileInput)
 
 	searchInput := textinput.New()
 	searchInput.Prompt = "Поиск: "
+	searchInput = chromeInputStyles(searchInput)
 
 	composeInput := textarea.New()
 	// Номера строк — дефолт редактора кода, для короткого черновика чата не нужны.
 	composeInput.ShowLineNumbers = false
+	// Base несёт фон панели сообщений на все листовые стили черновика
+	// (computedPrompt/Text/Placeholder/EndOfBuffer наследуют Base, а строка с
+	// курсором CursorLine сохраняет собственный чёрный фон-выделение, свой фон
+	// она не переопределяет) — карточка черновика живёт внутри панели
+	// сообщений и не должна оставлять непрокрашенных строк (0039).
+	composeInput.FocusedStyle.Base = composeInput.FocusedStyle.Base.Background(messagePanelBg())
+	composeInput.BlurredStyle.Base = composeInput.BlurredStyle.Base.Background(messagePanelBg())
 	// Enter зарезервирован под отправку (перехватывается в Update раньше, чем
 	// дойдёт до composeInput.Update), перенос строки — ctrl+j. Дефолтный
 	// InsertNewline ("enter"/"ctrl+m") противоречил бы этому — перебиндиваем,
@@ -335,18 +396,19 @@ func New(client auth.TDClientInterface, ctx context.Context, keys config.KeyBind
 	}
 
 	return Model{
-		client:       client,
-		ctx:          ctx,
-		version:      version,
-		viewport:     vp,
-		keys:         newKeyMap(keys),
-		settings:     settings,
-		theme:        th,
-		composeInput: composeInput,
-		commandInput: commandInput,
-		fileInput:    fileInput,
-		searchInput:  searchInput,
-		folderUnread: make(map[int32]int32),
+		client:         client,
+		ctx:            ctx,
+		version:        version,
+		viewport:       vp,
+		keys:           newKeyMap(keys),
+		settings:       settings,
+		theme:          th,
+		composeInput:   composeInput,
+		commandInput:   commandInput,
+		fileInput:      fileInput,
+		searchInput:    searchInput,
+		folderUnread:   make(map[int32]int32),
+		chatReadOutbox: make(map[int64]int64),
 	}
 }
 
@@ -367,7 +429,7 @@ func (m *Model) applyLayout() {
 	// всеми тремя панелями. Одна строка снизу — статус/подсказка режима,
 	// как и во всех остальных режимах.
 	m.paneRowHeight = max(0, m.height-statusReserve-paneTitleHeight)
-	m.viewport.Width = max(0, m.width-foldersPaneW-chatsPaneW)
+	m.viewport.Width = max(0, m.width-m.foldersPaneWidth()-m.chatsPaneWidth())
 	m.viewport.Height = m.paneRowHeight
 	if m.mode == modeInsert {
 		// Карточка черновика "съедает" часть высоты панели сообщений
@@ -396,6 +458,27 @@ func (m *Model) toggleHelp() {
 		m.mode = modeHelp
 	}
 	m.applyLayout()
+}
+
+// toggleAbout переключает режим modeAbout <-> modeNormal. Вызывается
+// по хоткею About (клавиша 't' в Normal). Зеркалирует логику toggleHelp.
+// При входе в modeAbout запускает первый тик анимации и возвращает его
+// команду; при выходе команда nil — следующий тик не планируется, анимация
+// естественно прекращается.
+func (m *Model) toggleAbout() tea.Cmd {
+	if m.mode == modeAbout {
+		m.mode = modeNormal
+	} else {
+		m.mode = modeAbout
+		m.aboutTickCol = 0
+	}
+	m.applyLayout()
+	if m.mode == modeAbout {
+		return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+			return aboutTickMsg(0)
+		})
+	}
+	return nil
 }
 
 // composeCardHeight — полная высота карточки черновика вместе с рамкой
@@ -456,7 +539,7 @@ func (m *Model) syncComposeHeight() {
 // трогаем (не дёргаем прокрутку зря).
 func (m *Model) rerenderMessagesAndScrollToCursor() {
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
 	m.viewport.SetContent(content)
 	if m.messageCursor < 0 || m.messageCursor >= len(offsets) {
 		return
@@ -478,7 +561,8 @@ func (m *Model) rerenderMessagesAndScrollToCursor() {
 func (m Model) Init() tea.Cmd {
 	loadChats := m.loadChatsCmd(map[string]interface{}{"@type": "chatListMain"}, 0)
 	return tea.Batch(loadChats, m.waitForMessageUpdate(), m.waitForChatFolders(),
-		m.waitForChatReadInboxUpdate(), m.waitForUnreadCountUpdate(), m.waitForUnreadChatCountUpdate(),
+		m.waitForChatReadInboxUpdate(), m.waitForChatReadOutboxUpdate(),
+		m.waitForUnreadCountUpdate(), m.waitForUnreadChatCountUpdate(),
 		m.checkUpdateCmd(false))
 }
 
@@ -509,7 +593,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// новую ширину (позицию прокрутки не трогаем, это вне задачи).
 		if len(m.messages) > 0 {
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
 			m.viewport.SetContent(content)
 		}
 		return m, nil
@@ -529,6 +613,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.chats = msg.chats
+		// Заполняем карту last_read_outbox_message_id из списка чатов.
+		for _, chat := range msg.chats {
+			m.chatReadOutbox[chat.ID] = chat.LastReadOutboxMessageID
+		}
 		return m, nil
 
 	case messagesLoadedMsg:
@@ -554,7 +642,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = msg.messages
 		m.messageCursor = max(0, len(m.messages)-1) // курсор всегда синхронизирован с последним сообщением (см. п.5)
 		contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-		content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
+		content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
 		m.viewport.SetContent(content)
 		m.viewport.GotoBottom()
 		return m, nil
@@ -578,7 +666,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, msg.message)
 			m.messageCursor = max(0, len(m.messages)-1)
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
 			m.viewport.SetContent(content)
 			m.viewport.GotoBottom()
 		}
@@ -602,7 +690,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, msg.message)
 			m.messageCursor = max(0, len(m.messages)-1)
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
 			m.viewport.SetContent(content)
 			m.viewport.GotoBottom()
 		}
@@ -659,7 +747,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, msg.message)
 			m.messageCursor = max(0, len(m.messages)-1)
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
 			m.viewport.SetContent(content)
 			if wasAtBottom {
 				m.viewport.GotoBottom()
@@ -696,6 +784,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.waitForChatReadInboxUpdate()
+
+	case chatReadOutboxUpdateMsg:
+		if msg.closed {
+			return m, nil
+		}
+		if !msg.valid {
+			return m, m.waitForChatReadOutboxUpdate() // нераспознанный апдейт — переподписка обязательна
+		}
+		m.chatReadOutbox[msg.chatID] = msg.lastReadOutboxMessageID
+		// Если это текущий открытый чат — перерисуем ленту, чтобы обновить глифы.
+		if msg.chatID == m.displayedChat {
+			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
+			m.viewport.SetContent(content)
+		}
+		return m, m.waitForChatReadOutboxUpdate()
 
 	case unreadCountUpdateMsg:
 		if msg.closed {
@@ -752,6 +856,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.updateAvailable = ""
 		m.status = fmt.Sprintf("Обновлено до %s — перезапустите telecli, чтобы применить", msg.version)
+		return m, nil
+
+	case aboutTickMsg:
+		// Анимация «бегущего блика» — работает только в modeAbout.
+		// При выходе из modeAbout переподписка не происходит (тик естественно
+		// прекращается): следующий tea.Tick планируем только из modeAbout.
+		if m.mode == modeAbout {
+			m.aboutTickCol = int(msg)
+			nextCol := int(msg) + 1
+			return m, tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+				return aboutTickMsg(nextCol)
+			})
+		}
 		return m, nil
 
 	case searchResultMsg:
@@ -951,6 +1068,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyLayout()
 			}
 			return m, nil
+		case modeAbout:
+			// Оверлей «о программе» — закрывается по Esc или повторному About.
+			// translateLayout нужен по той же причине, что и в modeHelp.
+			if msg.Type == tea.KeyEsc || key.Matches(translateLayout(msg), m.keys.About) {
+				m.mode = modeNormal
+				m.applyLayout()
+			}
+			return m, nil
 		case modeConfirmDelete:
 			yes := msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'y' || msg.Runes[0] == 'Y')
 			no := msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'n' || msg.Runes[0] == 'N')
@@ -1049,6 +1174,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toggleHelp()
 			return m, nil
 		}
+		if key.Matches(msg, m.keys.About) {
+			cmd := m.toggleAbout()
+			return m, cmd
+		}
 		// Удаление/покидание чата — работает только в обычном списке m.chats:
 		// вне панели чатов, в результатах поиска (там чат может быть ещё не
 		// "своим") или при пустом списке хоткей ничего не делает.
@@ -1110,11 +1239,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ряда — одни и те же физические клавиши на любой раскладке, поэтому
 		// таблица транслитерации их не трогает и трогать не должна.
 		if key.Matches(msg, m.keys.FocusPane1) {
-			m.focus = focusFolders
+			if m.focus == focusFolders {
+				m.foldersCollapsed = !m.foldersCollapsed
+			} else {
+				m.focus = focusFolders
+				m.foldersCollapsed = false
+			}
+			m.applyLayout() // ширина панелей изменилась — пересчитать m.viewport.Width
 			return m, nil
 		}
 		if key.Matches(msg, m.keys.FocusPane2) {
-			m.focus = focusChats
+			if m.focus == focusChats {
+				m.chatsCollapsed = !m.chatsCollapsed
+			} else {
+				m.focus = focusChats
+				m.chatsCollapsed = false
+			}
+			m.applyLayout() // ширина панелей изменилась — пересчитать m.viewport.Width
 			return m, nil
 		}
 		if key.Matches(msg, m.keys.FocusPane3) {
@@ -1375,6 +1516,29 @@ func (m Model) waitForChatReadInboxUpdate() tea.Cmd {
 	}
 }
 
+// waitForChatReadOutboxUpdate — tea.Cmd, блокирующийся на ОДНОМ значении из
+// client.ChatReadOutboxUpdates(). Срабатывает один раз за вызов — обязательна
+// переподписка в обработчике (тот же класс ловушки, что у waitForMessageUpdate).
+func (m Model) waitForChatReadOutboxUpdate() tea.Cmd {
+	ch := m.client.ChatReadOutboxUpdates()
+	ctx := m.ctx
+	return func() tea.Msg {
+		select {
+		case upd, ok := <-ch:
+			if !ok {
+				return chatReadOutboxUpdateMsg{closed: true}
+			}
+			chatID, lastReadOutboxMessageID, valid := auth.ParseChatReadOutboxUpdate(upd)
+			if !valid {
+				return chatReadOutboxUpdateMsg{} // безвредно проигнорируется, но переподписка продолжится
+			}
+			return chatReadOutboxUpdateMsg{chatID: chatID, lastReadOutboxMessageID: lastReadOutboxMessageID, valid: true}
+		case <-ctx.Done():
+			return chatReadOutboxUpdateMsg{closed: true}
+		}
+	}
+}
+
 // waitForUnreadCountUpdate — tea.Cmd, блокирующийся на ОДНОМ значении из
 // client.UnreadCountUpdates(). Срабатывает один раз за вызов — обязательна
 // переподписка в обработчике (тот же класс ловушки, что у waitForMessageUpdate).
@@ -1575,11 +1739,24 @@ func (m Model) View() string {
 	if m.mode == modeHelp {
 		return m.helpScreen()
 	}
+	if m.mode == modeAbout {
+		return m.aboutScreen()
+	}
 	fStart, fEnd := visibleWindow(len(m.folders)+1, m.folderCursor, m.listContentRows())
 	cStart, cEnd := visibleWindow(m.chatListLen(), m.chatListCursor(), m.listContentRows())
+	foldersTitle := paneTitle(m.foldersPaneWidth(), 1, "Папки", m.focus == focusFolders, m.theme, fStart > 0, fEnd < len(m.folders)+1)
+	if m.foldersCollapsed {
+		// Свёрнутая панель: в заголовке только "[N]" без названия и без
+		// scroll-индикатора (название целиком уходит в тело панели по буквам).
+		foldersTitle = paneTitle(m.foldersPaneWidth(), 1, "", m.focus == focusFolders, m.theme)
+	}
+	chatsTitle := paneTitle(m.chatsPaneWidth(), 2, "Чаты", m.focus == focusChats, m.theme, cStart > 0, cEnd < m.chatListLen())
+	if m.chatsCollapsed {
+		chatsTitle = paneTitle(m.chatsPaneWidth(), 2, "", m.focus == focusChats, m.theme)
+	}
 	titles := lipgloss.JoinHorizontal(lipgloss.Top,
-		paneTitle(foldersPaneW, 1, "Папки", m.focus == focusFolders, m.theme, fStart > 0, fEnd < len(m.folders)+1),
-		paneTitle(chatsPaneW, 2, "Чаты", m.focus == focusChats, m.theme, cStart > 0, cEnd < m.chatListLen()),
+		foldersTitle,
+		chatsTitle,
 		paneTitle(m.viewport.Width, 3, m.currentChatTitle(), m.focus == focusMessages, m.theme, !m.viewport.AtTop(), !m.viewport.AtBottom()),
 	)
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, m.foldersPane(), m.chatPane(), m.msgPane())
@@ -1682,6 +1859,155 @@ func (m Model) helpScreen() string {
 	return paneBox(m.width, m.height, strings.Join(lines, "\n"), true, m.theme, 0)
 }
 
+// aboutScreen — полноэкранный оверлей «о программе» (modeAbout):
+// крупный анимированный ASCII-логотип TELECLi, описание, версия, ссылка,
+// автор, благодарность. Анимация — «бегущий блик» по вертикальным колонкам
+// логотипа (акцентный цвет темы t.ActiveBorderColor, остальное — t.OwnColor).
+func (m Model) aboutScreen() string {
+	descStyle := lipgloss.NewStyle().Faint(true)
+
+	// Генерируем ASCII-логотип с анимацией блика. m.aboutTickCol — текущая
+	// колонка блика (0-based), растёт на 1 каждый тик; renderAboutBanner
+	// зацикливает её по ширине баннера (взятие модуля).
+	bannerLines := m.renderAboutBanner(m.aboutTickCol)
+
+	lines := []string{}
+	lines = append(lines, bannerLines...)
+	lines = append(lines, "")
+	lines = append(lines, descStyle.Render("Терминальный клиент Telegram с vim-подобной модальностью ввода"))
+	lines = append(lines, "")
+	lines = append(lines, descStyle.Render("Версия: "+m.version))
+	lines = append(lines, descStyle.Render("GitHub: github.com/zeroscrypt/telecli"))
+	lines = append(lines, descStyle.Render("Автор: @zeroscrypt"))
+	lines = append(lines, descStyle.Render("Благодарность: @hakatao"))
+	lines = append(lines, "")
+
+	// footer — подсказка закрытия ("Esc / t — закрыть"), ВСЕГДА последняя
+	// видимая строка, даже если остальной контент пришлось обрезать снизу.
+	footer := descStyle.Render("Esc / t — закрыть")
+
+	borderRows := paneBorderStyle(true, m.theme, 0).GetVerticalBorderSize()
+	maxRows := max(0, m.height-borderRows-2*panePaddingV)
+	switch {
+	case maxRows <= 0:
+		lines = nil
+	case len(lines)+1 > maxRows: // +1 — место под footer
+		lines = append(lines[:maxRows-1], footer)
+	default:
+		lines = append(lines, "", footer)
+	}
+
+	return paneBox(m.width, m.height, strings.Join(lines, "\n"), true, m.theme, 0)
+}
+
+// renderAboutBanner генерирует ASCII-баннер TELECLi с анимацией «бегущего блика».
+// tickCol — текущая колонка блика (0-based). Возвращает 6 строк баннера.
+// Логотип: 5 колонок на букву, 1 пробел между буквами. Слово TELECLI = 7 букв.
+// Уникальные глифы: T, E, L, C, I (E и L повторяются).
+// Цвета: колонка блика — t.ActiveBorderColor, остальные закрашенные — t.OwnColor.
+func (m Model) renderAboutBanner(tickCol int) []string {
+	// Глифы 5x6 (# → закрашено, . → пусто)
+	glyphs := map[rune][]string{
+		'T': {
+			"#####",
+			"..#..",
+			"..#..",
+			"..#..",
+			"..#..",
+			"..#..",
+		},
+		'E': {
+			"#####",
+			"#....",
+			"####.",
+			"#....",
+			"#....",
+			"#####",
+		},
+		'L': {
+			"#....",
+			"#....",
+			"#....",
+			"#....",
+			"#....",
+			"#####",
+		},
+		'C': {
+			".####",
+			"#....",
+			"#....",
+			"#....",
+			"#....",
+			".####",
+		},
+		'I': {
+			"#####",
+			"..#..",
+			"..#..",
+			"..#..",
+			"..#..",
+			"#####",
+		},
+	}
+
+	// Слово TELECLI: T-E-L-E-C-L-I
+	letters := []rune{'T', 'E', 'L', 'E', 'C', 'L', 'I'}
+
+	// Собираем 6 строк баннера (построчно)
+	const glyphW = 5
+	const glyphH = 6
+	const gap = 1
+	totalCols := len(letters)*glyphW + (len(letters)-1)*gap
+
+	// Сначала собираем «сырые» строки: для каждой ячейки знаем, закрашена ли она
+	// rawLines[row][col] = true если закрашено
+	rawLines := make([][]bool, glyphH)
+	for r := 0; r < glyphH; r++ {
+		rawLines[r] = make([]bool, totalCols)
+		colIdx := 0
+		for li, ch := range letters {
+			g := glyphs[ch]
+			for c := 0; c < glyphW; c++ {
+				if g[r][c] == '#' {
+					rawLines[r][colIdx] = true
+				}
+				colIdx++
+			}
+			if li < len(letters)-1 {
+				colIdx += gap // пробел между буквами
+			}
+		}
+	}
+
+	// Теперь рендерим с цветами: колонка блика — ActiveBorderColor, остальные — OwnColor
+	// tickCol может быть больше totalCols — берём модуль
+	highlightCol := tickCol % totalCols
+	if highlightCol < 0 {
+		highlightCol = 0
+	}
+
+	accentStyle := lipgloss.NewStyle().Foreground(m.theme.ActiveBorderColor).Bold(true)
+	baseStyle := lipgloss.NewStyle().Foreground(m.theme.OwnColor).Bold(true)
+
+	var result []string
+	for r := 0; r < glyphH; r++ {
+		var sb strings.Builder
+		for c := 0; c < totalCols; c++ {
+			if rawLines[r][c] {
+				if c == highlightCol {
+					sb.WriteString(accentStyle.Render("█"))
+				} else {
+					sb.WriteString(baseStyle.Render("█"))
+				}
+			} else {
+				sb.WriteString(" ")
+			}
+		}
+		result = append(result, sb.String())
+	}
+	return result
+}
+
 // chatListLen/chatListCursor — число элементов и позиция курсора в панели
 // чатов с учётом того, что там показывается: обычный список m.chats или (в
 // modeSearch/searchActive) результаты поиска. Общие для visibleWindow
@@ -1726,19 +2052,19 @@ func telecliLogo(t Theme) string {
 func (m Model) bottomLine() string {
 	switch m.mode {
 	case modeCommand:
-		return m.commandInput.View()
+		return chromeLine(m.width, m.commandInput.View())
 	case modeFile:
 		hint := ""
 		if m.sendingFile {
 			hint = " (отправка…)"
 		}
-		return m.fileInput.View() + hint
+		return chromeLine(m.width, m.fileInput.View()+chromeText(hint))
 	case modeSearch:
 		hint := ""
 		if m.searchingNow {
 			hint = " (поиск…)"
 		}
-		return m.searchInput.View() + hint
+		return chromeLine(m.width, m.searchInput.View()+chromeText(hint))
 	case modeInsert:
 		// Сам черновик (composeInput.View()) здесь больше НЕ рендерится —
 		// он переехал в msgPane() как отдельная карточка с белой рамкой
@@ -1750,8 +2076,8 @@ func (m Model) bottomLine() string {
 			hint = " (отправка…)"
 		}
 		logo := telecliLogo(m.theme)
-		modeTag := lipgloss.NewStyle().Foreground(m.theme.ChatSelectionColor).Bold(true).Render(" INP")
-		return logo + modeTag + lipgloss.NewStyle().Faint(true).Render(hint)
+		modeTag := lipgloss.NewStyle().Foreground(m.theme.ChatSelectionColor).Bold(true).Background(chromeBackground).Render(" INP")
+		return chromeLine(m.width, logo+modeTag+lipgloss.NewStyle().Faint(true).Background(chromeBackground).Render(hint))
 	case modeConfirmDelete:
 		var prompt string
 		switch {
@@ -1762,13 +2088,13 @@ func (m Model) bottomLine() string {
 		default:
 			prompt = "Удалить также у собеседника? (y/n, Esc — отмена)"
 		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render(prompt)
+		return chromeLine(m.width, lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Background(chromeBackground).Render(prompt))
 	default:
 		if m.status != "" {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.status)
+			return chromeLine(m.width, lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Background(chromeBackground).Render(m.status))
 		}
 		logo := telecliLogo(m.theme)
-		modeTag := lipgloss.NewStyle().Foreground(m.theme.ActiveBorderColor).Bold(true).Render(" NAV")
+		modeTag := lipgloss.NewStyle().Foreground(m.theme.ActiveBorderColor).Bold(true).Background(chromeBackground).Render(" NAV")
 		// Сначала — общие хоткеи (работают при любом фокусе), затем — контекстные
 		// для панели, которая сейчас в фокусе (по прямому запросу человека).
 		pairs := [][2]string{
@@ -1786,22 +2112,22 @@ func (m Model) bottomLine() string {
 		case focusMessages:
 			pairs = append(pairs, [2]string{"ctrl+f", "файл"})
 		}
-		hint := " " + renderHint(" · ", m.theme, pairs...)
+		hint := bgFill(chromeBackground, 1) + renderHint(" · ", m.theme, pairs...)
 		left := logo + modeTag + hint
 
 		versionText := m.version
 		if m.updateAvailable != "" {
 			versionText = fmt.Sprintf("%s → %s (:update)", m.version, m.updateAvailable)
 		}
-		versionRendered := lipgloss.NewStyle().Faint(true).Render(versionText)
+		versionRendered := lipgloss.NewStyle().Faint(true).Background(chromeBackground).Render(versionText)
 
 		pad := m.width - lipgloss.Width(left) - lipgloss.Width(versionRendered)
 		if pad < 1 {
 			// Не помещается рядом с версией на узком терминале — показываем
 			// только левую часть (пилюля+подсказка), не ломаем раскладку.
-			return left
+			return chromeLine(m.width, left)
 		}
-		return left + strings.Repeat(" ", pad) + versionRendered
+		return chromeLine(m.width, left+bgFill(chromeBackground, pad)+versionRendered)
 	}
 }
 
@@ -1849,6 +2175,54 @@ func visibleWindow(total, cursor, rows int) (start, end int) {
 	return start, start + rows
 }
 
+// foldersPaneWidth — эффективная ширина панели папок: свёрнутая панель
+// рисуется узкой вертикальной колонкой (collapsedPaneW), развёрнутая —
+// обычной шириной foldersPaneW.
+func (m Model) foldersPaneWidth() int {
+	if m.foldersCollapsed {
+		return collapsedPaneW
+	}
+	return foldersPaneW
+}
+
+// chatsPaneWidth — эффективная ширина панели чатов: свёрнутая панель рисуется
+// узкой вертикальной колонкой (collapsedPaneW), развёрнутая — обычной
+// шириной chatsPaneW.
+func (m Model) chatsPaneWidth() int {
+	if m.chatsCollapsed {
+		return collapsedPaneW
+	}
+	return chatsPaneW
+}
+
+// collapsedPaneBody — тело свёрнутой панели: пустая строка (продолжение "[N]"
+// из заголовка над панелью), затем название капсом по одной букве на строку.
+// Если высоты не хватает (contentRows < 1+len(letters)) — лишние буквы с
+// конца названия обрезаются молча, без "…" (вертикальное многоточие не
+// умещается по смыслу так же, как горизонтальное в paneTitle).
+func collapsedPaneBody(name string, contentRows int) string {
+	if contentRows <= 0 {
+		return ""
+	}
+	letters := []rune(strings.ToUpper(name))
+	lines := make([]string, 0, 1+len(letters))
+	lines = append(lines, "") // пустая строка сразу после "[N]" в заголовке
+	for _, r := range letters {
+		if len(lines) >= contentRows {
+			break
+		}
+		lines = append(lines, string(r))
+	}
+	// Каждая строка рендерится в ширину collapsedPaneContentW тем же приёмом,
+	// что в foldersPane/chatPane (Width на КАЖДУЮ строку до strings.Join) —
+	// без него строки разной ширины внутри рамки смотрелись бы рваными.
+	rendered := make([]string, len(lines))
+	for i, line := range lines {
+		rendered[i] = lipgloss.NewStyle().Width(collapsedPaneContentW).Render(line)
+	}
+	return strings.Join(rendered, "\n")
+}
+
 // foldersPane — панель слева: "Все чаты" (синтетический пункт, всегда первый)
 // + m.folders. Курсор — треугольник-маркер "▸" слева + жирное название (по
 // правке человека, без цветной пилюли — так папки отличаются от подсветки
@@ -1858,6 +2232,10 @@ func visibleWindow(total, cursor, rows int) (start, end int) {
 // вокруг m.folderCursor (см. listContentRows/visibleWindow) — весь список
 // длиннее окна прокручивается курсором, а не рендерится целиком.
 func (m Model) foldersPane() string {
+	if m.foldersCollapsed {
+		body := collapsedPaneBody("Папки", m.listContentRows())
+		return paneBox(m.foldersPaneWidth(), m.paneRowHeight, body, m.focus == focusFolders, m.theme, 1)
+	}
 	names := make([]string, len(m.folders)+1)
 	badges := make([]string, len(m.folders)+1)
 	names[0] = "Все чаты"
@@ -1871,7 +2249,7 @@ func (m Model) foldersPane() string {
 		badges[i+1] = unreadSuffix(m.folderUnread[f.ID])
 	}
 
-	contentW := foldersPaneW - 2 - 2*panePaddingH // минус рамка (2) и паддинг (2*panePaddingH), тот же приём, что в chatPane
+	contentW := m.foldersPaneWidth() - 2 - 2*panePaddingH // минус рамка (2) и паддинг (2*panePaddingH), тот же приём, что в chatPane
 	start, end := visibleWindow(len(names), m.folderCursor, m.listContentRows())
 
 	var sb strings.Builder
@@ -1887,7 +2265,7 @@ func (m Model) foldersPane() string {
 		sb.WriteString(style.Width(contentW).Render(content))
 		sb.WriteString("\n")
 	}
-	return paneBox(foldersPaneW, m.paneRowHeight, strings.TrimRight(sb.String(), "\n"), m.focus == focusFolders, m.theme, 1)
+	return paneBox(m.foldersPaneWidth(), m.paneRowHeight, strings.TrimRight(sb.String(), "\n"), m.focus == focusFolders, m.theme, 1)
 }
 
 // renderCursorList — общий рендер списка строк с курсором-пилюлей
@@ -1921,7 +2299,11 @@ func renderCursorList(labels []string, badges []string, cursor int, contentW int
 // без этого длинный список чатов/результатов поиска рендерился бы целиком и
 // ломал высоту терминала так же, как папки (см. комментарий listContentRows).
 func (m Model) chatPane() string {
-	contentW := chatsPaneW - 2 - 2*panePaddingH // минус рамка (2) и паддинг (2*panePaddingH)
+	if m.chatsCollapsed {
+		body := collapsedPaneBody("Чаты", m.listContentRows())
+		return paneBox(m.chatsPaneWidth(), m.paneRowHeight, body, m.focus == focusChats, m.theme, 2)
+	}
+	contentW := m.chatsPaneWidth() - 2 - 2*panePaddingH // минус рамка (2) и паддинг (2*panePaddingH)
 	contentRows := m.listContentRows()
 	if m.searchActive {
 		labels := make([]string, 0, len(m.searchResults.Chats)+len(m.searchResults.Contacts))
@@ -1936,7 +2318,7 @@ func (m Model) chatPane() string {
 		if len(labels) == 0 {
 			content = "Ничего не найдено"
 		}
-		return paneBox(chatsPaneW, m.paneRowHeight, content, m.focus == focusChats, m.theme, 2)
+		return paneBox(m.chatsPaneWidth(), m.paneRowHeight, content, m.focus == focusChats, m.theme, 2)
 	}
 	titles := chatTitles(m.chats)
 	badges := chatBadges(m.chats)
@@ -1945,7 +2327,7 @@ func (m Model) chatPane() string {
 	if len(m.chats) == 0 {
 		content = "Нет чатов"
 	}
-	return paneBox(chatsPaneW, m.paneRowHeight, content, m.focus == focusChats, m.theme, 2)
+	return paneBox(m.chatsPaneWidth(), m.paneRowHeight, content, m.focus == focusChats, m.theme, 2)
 }
 
 // unreadSuffix — бейдж счётчика непрочитанных для названий папок/чатов:
@@ -2048,8 +2430,10 @@ func (m Model) msgPane() string {
 // рамки, как в старых BBS-программах. width — ПОЛНАЯ ширина карточки вместе
 // с рамкой (тот же принцип, что у paneBox). alignRight — рисовать метку
 // (время+имя) у правого края верхней рамки, иначе — метку (имя+время) у
-// левого края.
-func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bool, t Theme) string {
+// левого края. lastReadOutboxMessageID — ID последнего прочитанного исходящего
+// сообщения в чате (0, если данных нет); используется для глифа прочтения на
+// своих сообщениях.
+func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bool, t Theme, lastReadOutboxMessageID int64) string {
 	b := lipgloss.RoundedBorder()
 	if selected {
 		// Двойная рамка — тот же визуальный язык "это выделено", что у
@@ -2073,27 +2457,47 @@ func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bo
 		borderCol = nickBorderColor(sender, t)
 	}
 
-	borderStyle := lipgloss.NewStyle().Foreground(borderCol)
+	// Фон панели (#212121 для панели №3) проставляется на КАЖДЫЙ листовой
+	// фрагмент строки карточки (см. messagePanelBg): фоновый цвет внешнего
+	// стиля ленты после первого же вложенного \x1b[0m перестаёт действовать
+	// до конца строки, поэтому без собственного фона на фрагментах хвост
+	// строки (и разделители-пробелы) оставались бы непрокрашенными (0039).
+	panelBg := messagePanelBg()
+	borderStyle := lipgloss.NewStyle().Foreground(borderCol).Background(panelBg)
 	// Обычное (не жирное) начертание + Faint — по правке человека, "меньше
 	// и тоньше" шрифт имени; реальный размер шрифта терминал не даёт менять
 	// посимвольно (настройка эмулятора, не приложения) — Faint (приглушённая
 	// яркость) это ближайшее достижимое: имя выглядит подписью, а не акцентом.
-	nameStyle := lipgloss.NewStyle().Foreground(nameCol).Faint(true)
+	nameStyle := lipgloss.NewStyle().Foreground(nameCol).Faint(true).Background(panelBg)
 	timeText := time.Unix(msg.Date, 0).Local().Format("15:04")
+	timeTextRendered := timeStyle.Background(panelBg)
+
+	// Глиф прочтения для своих сообщений: "✓" (Faint) — отправлено,
+	// "✓✓" (OwnColor) — прочитано. Для чужих сообщений глиф не рисуется.
+	var readGlyph string
+	var readGlyphStyle lipgloss.Style
+	if msg.IsOutgoing {
+		if msg.ID <= lastReadOutboxMessageID {
+			readGlyph = "✓✓"
+			readGlyphStyle = lipgloss.NewStyle().Foreground(t.OwnColor).Background(panelBg)
+		} else {
+			readGlyph = "✓"
+			readGlyphStyle = nameStyle // Faint, как имя отправителя
+		}
+	}
 
 	horizontalSpan := max(0, width-2) // без двух угловых символов
 
 	// gap/fixedW считаем ДО решения "есть ли место для метки" — порог должен
-	// зависеть от реальной фиксированной ширины (время+отступ), а не быть
-	// угаданным числом: иначе (ревью-находка) при horizontalSpan, которого
-	// хватает только впритык, maxNameW уходил в отрицательные значения,
-	// max(1, maxNameW) искусственно возвращал 1 символ имени вместо 0 — и
-	// итоговая метка вылезала за пределы horizontalSpan на 1+ колонку (та же
-	// природа бага, что уже поймана в textWidth выше, для другой переменной).
-	// minSpanForLabel — минимум, при котором после вычитания fixedW и 2 тире
-	// по краям гарантированно остаётся ХОТЯ БЫ 1 колонка на имя.
+	// зависеть от реальной фиксированной ширины (время+отступ+глиф), а не быть
+	// угаданным числом.
 	gap := "  "
-	fixedW := lipgloss.Width(timeText) + lipgloss.Width(gap)
+	gapRendered := bgFill(panelBg, lipgloss.Width(gap))
+	readGlyphSuffix := ""
+	if readGlyph != "" {
+		readGlyphSuffix = bgFill(panelBg, 1) + readGlyphStyle.Render(readGlyph)
+	}
+	fixedW := lipgloss.Width(timeText) + lipgloss.Width(gap) + lipgloss.Width(readGlyphSuffix)
 	minSpanForLabel := fixedW + 3 // +2 тире по краям, +1 минимум на имя
 
 	var top string
@@ -2106,9 +2510,9 @@ func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bo
 
 		var label string
 		if alignRight {
-			label = timeStyle.Render(timeText) + gap + nameStyle.Render(name)
+			label = timeTextRendered.Render(timeText) + readGlyphSuffix + gapRendered + nameStyle.Render(name)
 		} else {
-			label = nameStyle.Render(name) + gap + timeStyle.Render(timeText)
+			label = nameStyle.Render(name) + gapRendered + timeTextRendered.Render(timeText) + readGlyphSuffix
 		}
 		labelW := lipgloss.Width(label)
 		dashesTotal := max(0, horizontalSpan-labelW)
@@ -2141,15 +2545,15 @@ func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bo
 	if contentSlot >= 3 { // 1 колонка тексту + по 1 пробелу с каждой стороны
 		padW = 1
 	}
-	pad := strings.Repeat(" ", padW)
+	padRendered := bgFill(panelBg, padW)
 	textWidth := max(1, contentSlot-2*padW)
-	bodyRendered := lipgloss.NewStyle().Foreground(bodyColor).Width(textWidth).Render(msg.Text)
+	bodyRendered := lipgloss.NewStyle().Foreground(bodyColor).Width(textWidth).Background(panelBg).Render(msg.Text)
 
 	var sb strings.Builder
 	sb.WriteString(top)
 	sb.WriteString("\n")
 	for _, line := range strings.Split(bodyRendered, "\n") {
-		sb.WriteString(borderStyle.Render(b.Left) + pad + line + pad + borderStyle.Render(b.Right))
+		sb.WriteString(borderStyle.Render(b.Left) + padRendered + line + padRendered + borderStyle.Render(b.Right))
 		sb.WriteString("\n")
 	}
 	sb.WriteString(borderStyle.Render(b.BottomLeft + strings.Repeat(b.Bottom, horizontalSpan) + b.BottomRight))
@@ -2157,17 +2561,20 @@ func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bo
 }
 
 // naturalCardWidth — минимально необходимая ширина карточки (вместе с
-// рамкой) для сообщения msg: максимум из (а) ширины шапки "Имя  ЧЧ:ММ" БЕЗ
-// обрезки и (б) ширины тела после word-wrap по максимально доступной ширине
-// (maxHorizontalSpan — содержательная ширина карточки, если бы она заняла
-// всю ленту, т.е. width-2) — но не шире maxHorizontalSpan+2. По прямому
-// запросу человека — карточка не должна растягиваться на всю ширину ленты,
-// если контенту столько не нужно ("минимальная ширина рамки"). Используется
-// в renderMessages ДО вызова renderMessageCard — сама renderMessageCard не
-// меняется, её контракт "рендерит ровно переданную width" остаётся прежним
-// (см. TestRenderMessageCardNarrowWidthLineWidthsMatch), просто ей отдаётся
-// уже вычисленная здесь, более узкая ширина.
-func naturalCardWidth(msg auth.Message, maxHorizontalSpan int) int {
+// рамкой) для сообщения msg: максимум из (а) ширины шапки "Имя  ЧЧ:ММ  ✓✓" БЕЗ
+// обрезки (с учётом глифа прочтения для исходящих) и (б) ширины тела после
+// word-wrap по максимально доступной ширине (maxHorizontalSpan — содержательная
+// ширина карточки, если бы она заняла всю ленту, т.е. width-2) — но не шире
+// maxHorizontalSpan+2. По прямому запросу человека — карточка не должна
+// растягиваться на всю ширину ленты, если контенту столько не нужно
+// ("минимальная ширина рамки"). Используется в renderMessages ДО вызова
+// renderMessageCard — сама renderMessageCard не меняется, её контракт
+// "рендерит ровно переданную width" остаётся прежним (см.
+// TestRenderMessageCardNarrowWidthLineWidthsMatch), просто ей отдаётся уже
+// вычисленная здесь, более узкая ширина. lastReadOutboxMessageID — ID
+// последнего прочитанного исходящего сообщения в чате (0, если данных нет);
+// учитывается для ширины глифа прочтения ("✓" или "✓✓") на своих сообщениях.
+func naturalCardWidth(msg auth.Message, maxHorizontalSpan int, lastReadOutboxMessageID int64) int {
 	if maxHorizontalSpan <= 0 {
 		return 2
 	}
@@ -2197,7 +2604,21 @@ func naturalCardWidth(msg auth.Message, maxHorizontalSpan int) int {
 	}
 	gap := "  "
 	timeText := time.Unix(msg.Date, 0).Local().Format("15:04")
-	headerSpan := lipgloss.Width(sender) + lipgloss.Width(gap) + lipgloss.Width(timeText) + 2 // +2: минимум по 1 тире с каждого края метки
+	// Ширина глифа прочтения для исходящих сообщений — тот же контракт, что у
+	// renderMessageCard: "✓✓" при msg.ID <= lastReadOutboxMessageID (2 руны + 1
+	// пробел-разделитель = 3 колонки), иначе спокойная "✓" (1 руна + пробел =
+	// 2 колонки). Считаем ПО ФАКТУ сообщения, а не худший случай — иначе
+	// непрочитанные исходящие получали бы лишнюю колонку (карточка шире, чем
+	// реально нужно).
+	readGlyphW := 0
+	if msg.IsOutgoing {
+		if msg.ID <= lastReadOutboxMessageID {
+			readGlyphW = 3
+		} else {
+			readGlyphW = 2
+		}
+	}
+	headerSpan := lipgloss.Width(sender) + lipgloss.Width(gap) + lipgloss.Width(timeText) + readGlyphW + 2 // +2: минимум по 1 тире с каждого края метки
 
 	return min(maxHorizontalSpan, max(bodySpan, headerSpan)) + 2 // +2 — рамка
 }
@@ -2213,7 +2634,9 @@ func naturalCardWidth(msg auth.Message, maxHorizontalSpan int) int {
 // карточки (и симметрично сужать чужие, оставляя их у левого края) — см.
 // Settings.AlignOwnRight. selectedIdx — индекс сообщения, чья карточка
 // выделяется курсором (двойная рамка, либо маркер "▸" в деградированном
-// режиме).
+// режиме). lastReadOutboxMessageID — ID последнего прочитанного исходящего
+// сообщения в текущем чате (0, если данных нет); используется для глифа
+// прочтения на своих сообщениях.
 //
 // Второй возврат lineOffsets[i] — номер строки (считая с 0) внутри content,
 // на которой начинается верхняя рамка (или, в деградированном режиме
@@ -2226,7 +2649,7 @@ func naturalCardWidth(msg auth.Message, maxHorizontalSpan int) int {
 // подсчётом добавленных '\n' — так lineOffsets не разъедутся с реальным
 // разбиением на строки (тот же класс бага, что уже дважды ловили в этой
 // функции).
-func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selectedIdx int, t Theme) (string, []int) {
+func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selectedIdx int, t Theme, lastReadOutboxMessageID int64) (string, []int) {
 	offsets := make([]int, len(msgs))
 	var allLines []string
 
@@ -2262,17 +2685,29 @@ func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selected
 		// не должна давать cardWidth > width (тот же класс бага ширины, что
 		// уже ловили 4 раза в этом проекте) — страховка на всякий случай,
 		// сама naturalCardWidth уже клэмпит внутри себя.
-		cardWidth := min(width, naturalCardWidth(msg, max(0, width-2)))
+		cardWidth := min(width, naturalCardWidth(msg, max(0, width-2), lastReadOutboxMessageID))
 		rightAlign := alignOwnRight && msg.IsOutgoing
-		card := renderMessageCard(msg, cardWidth, rightAlign, i == selectedIdx, t)
+		card := renderMessageCard(msg, cardWidth, rightAlign, i == selectedIdx, t, lastReadOutboxMessageID)
+		lines := strings.Split(card, "\n")
 		if rightAlign {
-			pad := strings.Repeat(" ", max(0, width-cardWidth))
-			lines := strings.Split(card, "\n")
-			for j, l := range lines {
-				lines[j] = pad + l
+			// Прижим вправо: ведущая часть строки — поздний свободный фон
+			// панели (не голые пробелы — те не несут фона, см. bgFill).
+			lead := bgFill(messagePanelBg(), max(0, width-cardWidth))
+			for j := range lines {
+				lines[j] = lead + lines[j]
 			}
-			card = strings.Join(lines, "\n")
 		}
+		// Доливка фона панели до полной ширины ленты: строки карточки уже
+		// непрозрачны (см. renderMessageCard), но справа от узкой карточки
+		// пустые колонки остаются незакрашенными (viewport добавил бы туда
+		// голые пробелы после последнего \x1b[0m строки) — заполняем их
+		// фоновым цветом явно.
+		for j, l := range lines {
+			if gap := width - lipgloss.Width(l); gap > 0 {
+				lines[j] = l + bgFill(messagePanelBg(), gap)
+			}
+		}
+		card = strings.Join(lines, "\n")
 		allLines = append(allLines, strings.Split(card, "\n")...)
 		if i != len(msgs)-1 {
 			allLines = append(allLines, "")
@@ -2281,72 +2716,13 @@ func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selected
 	return strings.Join(allLines, "\n"), offsets
 }
 
-// spaceOutRunes вставляет один пробел между каждой парой рун ("ПАПКИ" →
-// "П А П К И") — классический приём "разрядки" в ретро-консольных
-// интерфейсах, единственный доступный способ имитировать "пиксельный" шрифт
-// без реального контроля над шрифтом терминала (согласовано с человеком).
-// budget — доступная ширина В КОЛОНКАХ для результата.
-//
-// Резервирует колонку под "…" ДО заполнения, а не постфактум: жадное
-// заполнение всего budget с последующей попыткой "если после этого ещё есть
-// место — допишем …" ломается ровно на границе (ревью-находка) — если
-// разрядка вплотную исчерпывает budget, для "…" уже не остаётся ни одной
-// колонки, хотя обрезка произошла. Поэтому сперва считаем полную ширину без
-// обрезки: если она укладывается в budget — возвращаем как есть; если нет —
-// заполняем ТОЛЬКО budget-1 колонку и добавляем "…" — так место под "…"
-// гарантировано всегда, когда обрезка вообще происходит.
-func spaceOutRunes(s string, budget int) string {
-	runes := []rune(s)
-
-	full := 0
-	for i, r := range runes {
-		if i > 0 {
-			full++ // разделяющий пробел
-		}
-		full += runewidth.RuneWidth(r)
-	}
-	if full <= budget {
-		var b strings.Builder
-		for i, r := range runes {
-			if i > 0 {
-				b.WriteByte(' ')
-			}
-			b.WriteRune(r)
-		}
-		return b.String()
-	}
-
-	ellipsisBudget := budget - 1
-	var b strings.Builder
-	width := 0
-	for i, r := range runes {
-		rw := runewidth.RuneWidth(r)
-		sep := 0
-		if i > 0 {
-			sep = 1
-		}
-		if width+sep+rw > ellipsisBudget {
-			break
-		}
-		if sep == 1 {
-			b.WriteByte(' ')
-			width++
-		}
-		b.WriteRune(r)
-		width += rw
-	}
-	if ellipsisBudget >= 0 {
-		b.WriteString("…")
-	}
-	return b.String()
-}
-
 // paneTitle — заголовочная строка НАД панелью, той же ширины, что и сама
 // панель целиком (см. комментарий у paneBox — тот же класс ширины). num —
 // номер панели для хоткея прямого перехода (см. FocusPane1/2/3), показывается
-// как "[N] " перед названием. Название — ВСЕМИ КАПС с разрядкой между буквами
-// (spaceOutRunes) — реального "пиксельного" шрифта терминал не даёт, это
-// имитация в пределах одной строки, ширина/высота панелей не меняются.
+// как "[N] " перед названием. Название — ВСЕМИ КАПС, без разрядки между
+// буквами (раньше была — убрана по прямому запросу человека); длинные имена
+// (например, название открытого чата у панели сообщений) обрезаются по
+// ширине через runewidth.Truncate с многоточием "…" на конце.
 //
 // scroll — необязательная пара (hasAbove, hasBelow): есть ли скрытый контент
 // выше/ниже видимой области панели. Вариадик, а не обычные bool-параметры —
@@ -2368,9 +2744,12 @@ func paneTitle(width, num int, text string, focused bool, t Theme, scroll ...boo
 	}
 	suffixW := runewidth.StringWidth(suffix)
 	budget := max(0, width-runewidth.StringWidth(prefix)-suffixW)
-	spaced := spaceOutRunes(strings.ToUpper(text), budget)
-	padded := runewidth.FillRight(prefix+spaced, max(0, width-suffixW)) + suffix
-	return lipgloss.NewStyle().Bold(true).Foreground(color).Width(width).Render(padded)
+	truncated := runewidth.Truncate(strings.ToUpper(text), budget, "…")
+	padded := runewidth.FillRight(prefix+truncated, max(0, width-suffixW)) + suffix
+	// Заголовок панели — часть "хрома" на сплошном чёрном фоне (0039); padded
+	// — чистый текст без вложенных сбросов, поэтому внешнего Background()
+	// здесь достаточно (в отличие от строк с вложенными стилями, см. bgFill).
+	return lipgloss.NewStyle().Bold(true).Foreground(color).Background(chromeBackground).Width(width).Render(padded)
 }
 
 // scrollIndicatorSuffix — " ▲"/" ▼"/" ⇅" в конце заголовка панели: часть

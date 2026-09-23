@@ -66,6 +66,20 @@ func ParseChatReadInboxUpdate(update map[string]interface{}) (chatID int64, unre
 	return int64(id), int32(count), true
 }
 
+// ParseChatReadOutboxUpdate разбирает updateChatReadOutbox — последний
+// прочитанный ID исходящего сообщения в чате. message ID (int53), не count.
+func ParseChatReadOutboxUpdate(update map[string]interface{}) (chatID int64, lastReadOutboxMessageID int64, ok bool) {
+	if update["@type"] != "updateChatReadOutbox" {
+		return 0, 0, false
+	}
+	id, idOk := update["chat_id"].(float64)
+	msgID, msgIDOk := update["last_read_outbox_message_id"].(float64)
+	if !idOk || !msgIDOk {
+		return 0, 0, false
+	}
+	return int64(id), int64(msgID), true
+}
+
 // ParseUnreadMessageCountUpdate разбирает updateUnreadMessageCount —
 // агрегированное количество НЕПРОЧИТАННЫХ СООБЩЕНИЙ (не чатов!) по ЦЕЛОМУ
 // списку чатов. Берётся unread_count (ВКЛЮЧАЯ замьюченные чаты) — по живой

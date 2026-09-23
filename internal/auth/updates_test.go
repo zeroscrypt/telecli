@@ -199,6 +199,49 @@ func TestParseChatReadInboxUpdateMissingFields(t *testing.T) {
 	}
 }
 
+func TestParseChatReadOutboxUpdateValid(t *testing.T) {
+	update := map[string]interface{}{
+		"@type":                       "updateChatReadOutbox",
+		"chat_id":                     float64(42),
+		"last_read_outbox_message_id": float64(123456789),
+	}
+	chatID, lastReadOutboxMessageID, ok := ParseChatReadOutboxUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for valid updateChatReadOutbox")
+	}
+	if chatID != 42 {
+		t.Errorf("expected chatID 42, got %d", chatID)
+	}
+	if lastReadOutboxMessageID != 123456789 {
+		t.Errorf("expected lastReadOutboxMessageID 123456789, got %d", lastReadOutboxMessageID)
+	}
+}
+
+func TestParseChatReadOutboxUpdateWrongType(t *testing.T) {
+	update := map[string]interface{}{"@type": "updateAuthorizationState"}
+	if _, _, ok := ParseChatReadOutboxUpdate(update); ok {
+		t.Fatal("expected ok == false for wrong @type")
+	}
+}
+
+func TestParseChatReadOutboxUpdateMissingFields(t *testing.T) {
+	// Нет chat_id.
+	update := map[string]interface{}{"@type": "updateChatReadOutbox", "last_read_outbox_message_id": float64(100)}
+	if _, _, ok := ParseChatReadOutboxUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_id missing")
+	}
+	// Нет last_read_outbox_message_id.
+	update = map[string]interface{}{"@type": "updateChatReadOutbox", "chat_id": float64(42)}
+	if _, _, ok := ParseChatReadOutboxUpdate(update); ok {
+		t.Fatal("expected ok == false when last_read_outbox_message_id missing")
+	}
+	// chat_id не число.
+	update = map[string]interface{}{"@type": "updateChatReadOutbox", "chat_id": "42", "last_read_outbox_message_id": float64(100)}
+	if _, _, ok := ParseChatReadOutboxUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_id is not a number")
+	}
+}
+
 func TestParseUnreadMessageCountUpdateMain(t *testing.T) {
 	update := map[string]interface{}{
 		"@type": "updateUnreadMessageCount",

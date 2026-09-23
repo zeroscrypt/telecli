@@ -25,6 +25,7 @@ type Client struct {
 	sendStatusUpdates      chan map[string]interface{}
 	chatFolderUpdates      chan map[string]interface{}
 	chatReadInboxUpdates   chan map[string]interface{}
+	chatReadOutboxUpdates  chan map[string]interface{}
 	unreadCountUpdates     chan map[string]interface{}
 	unreadChatCountUpdates chan map[string]interface{}
 	nextExtra              int64
@@ -54,6 +55,9 @@ func NewClient() *Client {
 		// Апдейты о прочтении внутри чата могут приходить часто (как у
 		// messageUpdates) — буфер по аналогии.
 		chatReadInboxUpdates: make(chan map[string]interface{}, 20),
+		// Апдейты о прочтении своих исходящих сообщений (updateChatReadOutbox)
+		// по частоте аналогичны chatReadInboxUpdates — тот же буфер.
+		chatReadOutboxUpdates: make(chan map[string]interface{}, 20),
 		// Агрегаты по спискам чатов (папкам) меняются редко — буфер как у
 		// chatFolderUpdates.
 		unreadCountUpdates: make(chan map[string]interface{}, 5),
@@ -153,6 +157,18 @@ func (c *Client) receiveLoop() {
 			// просто отбрасываются.
 			select {
 			case c.chatReadInboxUpdates <- resp:
+			default:
+			}
+			continue
+		}
+
+		if updType, ok := resp["@type"].(string); ok && updType == "updateChatReadOutbox" {
+			// Тот же паттерн, что у chatReadInboxUpdates: неблокирующая отправка
+			// с дропом при переполнении. Счётчики прочтения исходящих сообщений
+			// (updateChatReadOutbox) читаются этим каналом; до подписки
+			// избыточные апдейты просто отбрасываются.
+			select {
+			case c.chatReadOutboxUpdates <- resp:
 			default:
 			}
 			continue
@@ -339,6 +355,10 @@ func (c *Client) ChatFolderUpdates() <-chan map[string]interface{} {
 
 func (c *Client) ChatReadInboxUpdates() <-chan map[string]interface{} {
 	return c.chatReadInboxUpdates
+}
+
+func (c *Client) ChatReadOutboxUpdates() <-chan map[string]interface{} {
+	return c.chatReadOutboxUpdates
 }
 
 func (c *Client) UnreadCountUpdates() <-chan map[string]interface{} {

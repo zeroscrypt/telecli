@@ -55,6 +55,7 @@ func TestLoadKeyBindingsPartialOverride(t *testing.T) {
 	require.Equal(t, defaults.EnterCommand, keys.EnterCommand)
 	require.Equal(t, defaults.SendFile, keys.SendFile)
 	require.Equal(t, defaults.Search, keys.Search)
+	require.Equal(t, defaults.About, keys.About)
 }
 
 func TestLoadKeyBindingsEmptyFieldFallsBackToDefault(t *testing.T) {
@@ -93,6 +94,7 @@ send_file = ["ctrl+d"]
 search = ["/"]
 show_help = ["h"]
 delete_chat = ["x"]
+about = ["a"]
 `)
 
 	keys, err := LoadKeyBindings()
@@ -116,6 +118,7 @@ delete_chat = ["x"]
 		Search:       []string{"/"},
 		ShowHelp:     []string{"h"},
 		DeleteChat:   []string{"x"},
+		About:        []string{"a"},
 	}
 	require.Equal(t, want, keys)
 }

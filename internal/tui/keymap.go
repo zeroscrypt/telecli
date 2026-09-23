@@ -25,6 +25,7 @@ type KeyMap struct {
 	Search       key.Binding
 	ShowHelp     key.Binding
 	DeleteChat   key.Binding
+	About        key.Binding
 }
 
 func newKeyMap(cfg config.KeyBindings) KeyMap {
@@ -46,5 +47,6 @@ func newKeyMap(cfg config.KeyBindings) KeyMap {
 		Search:       key.NewBinding(key.WithKeys(cfg.Search...), key.WithHelp("/", "поиск")),
 		ShowHelp:     key.NewBinding(key.WithKeys(cfg.ShowHelp...), key.WithHelp("h", "справка")),
 		DeleteChat:   key.NewBinding(key.WithKeys(cfg.DeleteChat...), key.WithHelp("d", "удалить/покинуть чат")),
+		About:        key.NewBinding(key.WithKeys(cfg.About...), key.WithHelp("t", "о программе")),
 	}
 }

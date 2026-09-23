@@ -181,6 +181,7 @@ telecli send -m "for a channel" -- -1001234567890 # negative chat_id — after "
 | `:` | command line (`:q`/`:quit`, `:help`, `:update`/`:update install`, `:theme <name>`) |
 | `/` | search chats/channels/contacts |
 | `h` | help screen — full list of keybindings (same as `:help`) |
+| `t` | about screen — TELECLi logo, version, GitHub link, author |
 | `d` | leave/delete the chat under the cursor (with confirmation) |
 | `ctrl+f` | send a file (path prompt) |
 | `q`, `ctrl+c` | quit |

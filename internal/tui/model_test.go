@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -49,6 +51,7 @@ type fakeClient struct {
 	// каналы для ChatReadInboxUpdates()/UnreadCountUpdates()/
 	// UnreadChatCountUpdates(), по аналогии с folderCh.
 	chatReadInboxCh   chan map[string]interface{}
+	chatReadOutboxCh  chan map[string]interface{}
 	unreadCountCh     chan map[string]interface{}
 	unreadChatCountCh chan map[string]interface{}
 	requests          []map[string]interface{}
@@ -81,6 +84,10 @@ func (f *fakeClient) ChatFolderUpdates() <-chan map[string]interface{} { return 
 
 func (f *fakeClient) ChatReadInboxUpdates() <-chan map[string]interface{} {
 	return f.chatReadInboxCh
+}
+
+func (f *fakeClient) ChatReadOutboxUpdates() <-chan map[string]interface{} {
+	return f.chatReadOutboxCh
 }
 
 func (f *fakeClient) UnreadCountUpdates() <-chan map[string]interface{} {
@@ -359,7 +366,7 @@ func TestViewRendersPanes(t *testing.T) {
 	}
 
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: "текст", Date: 100}}
-	view, _ = renderMessages(m.messages, 0, false, 0, defaultTheme())
+	view, _ = renderMessages(m.messages, 0, false, 0, defaultTheme(), 0)
 	if !strings.Contains(view, "текст") {
 		t.Errorf("renderMessages missing text:\n%s", view)
 	}
@@ -369,7 +376,7 @@ func TestRenderMessagesWrapsLongText(t *testing.T) {
 	longText := "одно два три четыре пять шесть семь восемь девять десять"
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 
-	got, _ := renderMessages(msgs, 20, false, 0, defaultTheme())
+	got, _ := renderMessages(msgs, 20, false, 0, defaultTheme(), 0)
 	lines := strings.Split(got, "\n")
 	// Карточка: верхняя рамка + N строк тела + нижняя рамка; длинный текст не
 	// умещается в одну строку на 20 колонок, значит N >= 2, итого строк >= 4.
@@ -395,7 +402,7 @@ func TestRenderMessagesZeroWidthDoesNotWrap(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 
 	for _, width := range []int{0, -1} {
-		got, _ := renderMessages(msgs, width, false, 0, defaultTheme())
+		got, _ := renderMessages(msgs, width, false, 0, defaultTheme(), 0)
 		// Перенос сохранён: строк такое же число, как и у текста без переноса.
 		if lines := strings.Split(got, "\n"); len(lines) != 2 {
 			t.Errorf("width=%d: expected single body line (no wrap), got %d lines:\n%s", width, len(lines), got)
@@ -413,7 +420,7 @@ func TestWindowSizeMsgRewrapsExistingMessages(t *testing.T) {
 	m.displayedChat = 111
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, _ := renderMessages(m.messages, contentWidth, false, 0, defaultTheme())
+	content, _ := renderMessages(m.messages, contentWidth, false, 0, defaultTheme(), 0)
 	m.viewport.SetContent(content)
 
 	// Новый, более узкий размер терминала: лента перерисовывается под него.
@@ -453,7 +460,7 @@ func TestNickIndexDistributesAcrossPalette(t *testing.T) {
 func TestRenderMessageCardTopLineContainsSenderName(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Ирина", Text: "привет", Date: 100}}
 
-	got, _ := renderMessages(msgs, 20, false, 0, defaultTheme())
+	got, _ := renderMessages(msgs, 20, false, 0, defaultTheme(), 0)
 	first := strings.Split(got, "\n")[0]
 	if !strings.Contains(first, "Ирина") {
 		t.Errorf("top card line must contain sender name, got: %q", first)
@@ -462,15 +469,18 @@ func TestRenderMessageCardTopLineContainsSenderName(t *testing.T) {
 
 // alignOwnRight=true прижимает МОИ карточки к правому краю ленты: каждая
 // непустая строка карточки имеет ведущие пробелы и полную ширину ленты.
+// Фикс фона 0039 добавил в начало строк ANSI-префикс фона панели, поэтому
+// первый символ строки — не буква, а ESC-последовательность: для проверки
+// ведущего пробела сравниваем ОЧИЩЕННУЮ от ANSI строку.
 func TestRenderMessagesAlignOwnRightPadsOwnCardToRightEdge(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: "моё", Date: 100, IsOutgoing: true}}
 
-	got, _ := renderMessages(msgs, 60, true, 0, defaultTheme())
+	got, _ := renderMessages(msgs, 60, true, 0, defaultTheme(), 0)
 	for _, line := range strings.Split(got, "\n") {
 		if line == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, " ") {
+		if !strings.HasPrefix(stripANSI(line), " ") {
 			t.Errorf("own card line must be padded to the right edge, got leading non-space: %q", line)
 		}
 		if w := lipgloss.Width(line); w != 60 {
@@ -494,7 +504,7 @@ func TestRenderMessagesAlignOwnRightFalseNoRightPadding(t *testing.T) {
 		{ID: 2, SenderName: "Ирина", Text: "чужое", Date: 101},
 	}
 
-	got, _ := renderMessages(msgs, 60, false, 0, defaultTheme())
+	got, _ := renderMessages(msgs, 60, false, 0, defaultTheme(), 0)
 	cards := strings.Split(got, "\n\n")
 	if len(cards) != 2 {
 		t.Fatalf("expected 2 cards, got %d:\n%s", len(cards), got)
@@ -509,18 +519,183 @@ func TestRenderMessagesAlignOwnRightFalseNoRightPadding(t *testing.T) {
 			if firstLine == "" {
 				firstLine = line
 			}
-			if w := lipgloss.Width(line); w > maxLineW {
-				maxLineW = w
-			}
 			if w := lipgloss.Width(line); w > 60 {
 				t.Errorf("card line wider than lane: width=%d, line=%q", w, line)
 			}
+			// Видимая ширина карточки — без хвостовой доливки фона панели до
+			// ширины ленты (фикс 0039): доливка добавляет ANSI-префикс и
+			// пробелы, они ширину карточки не увеличивают.
+			visible := strings.TrimRight(stripANSI(line), " ")
+			if vw := lipgloss.Width(visible); vw > maxLineW {
+				maxLineW = vw
+			}
 		}
-		if strings.HasPrefix(firstLine, " ") {
-			t.Errorf("card must be flush-left (no leading space), got: %q", firstLine)
+		if strings.HasPrefix(stripANSI(firstLine), " ") {
+			t.Errorf("card must be flush-left (no leading space), got: %q", stripANSI(firstLine))
 		}
 		if maxLineW >= 60 {
 			t.Errorf("short message card should be narrower than the lane (60), got width=%d", maxLineW)
+		}
+	}
+}
+
+// === Задача 0039: непрерывность фона ===
+
+// sgrState — состояние SGR-атрибутов на текущей позиции строки: из него
+// uncoveredCols решает, покрыта ли закраской очередная ячейка.
+type sgrState struct {
+	hasBG bool // установлен ли явный фоновый цвет
+	rev   bool // активен ли reverse video (ячейка заливается инверсией, не фона терминала)
+}
+
+// apply разбирает один набор параметров SGR-последовательности («…;…;…» из
+// `\x1b[…m`). Параметры одной последовательности приходят вперемешку (fg, bg,
+// модификаторы) — lipgloss склеивает всё в один CSI. «38»/«39» на hasBG не
+// влияют; «48» — только когда за ним реально идёт селектор расширенного цвета
+// (2 или 5): синяя компонента TrueColor-фона в склеенной последовательности
+// выглядит как голый «48», и трактовать её как установку фона — ложное
+// срабатывание.
+func (st *sgrState) apply(params []string) {
+	for i := 0; i < len(params); i++ {
+		switch p := params[i]; p {
+		case "", "0":
+			st.hasBG = false
+			st.rev = false
+		case "49":
+			st.hasBG = false
+		case "7":
+			st.rev = true
+		case "27":
+			st.rev = false
+		case "48":
+			if n := 1 + sgrColorLen(params[i+1:]); n > 1 {
+				st.hasBG = true
+				i += n
+			}
+		case "38", "39":
+			i += 1 + sgrColorLen(params[i+1:])
+		default:
+			if n, err := strconv.Atoi(p); err == nil && (n >= 40 && n <= 47 || n >= 100 && n <= 107) {
+				st.hasBG = true
+			}
+		}
+	}
+}
+
+// sgrColorLen возвращает число компонент расширенного цвета ПОСЛЕ селектора:
+// 3 для «2;R;G;B», 1 для «5;N», 0 если селектора нет.
+func sgrColorLen(ps []string) int {
+	if len(ps) == 0 {
+		return 0
+	}
+	switch ps[0] {
+	case "2":
+		return 3
+	case "5":
+		return 1
+	}
+	return 0
+}
+
+// uncoveredCols возвращает номера колонок строки s (обход по рунам), для
+// которых на момент отрисовки НЕ был установлен ни фоновый SGR-код, ни
+// reverse video — такие ячейки унаследовали бы цвет фона терминала, а не
+// панели/хрома. Именно хвост после внутреннего `\x1b[0m` был багом 0039:
+// карточка закрывала свой цвет и вместе с ним сбрасывала фон внешнего слоя.
+// Reverse video заливкой НЕ считается «прозрачной» ячейкой (инверсия красит),
+// единственное его применение в UI — блок курсора в поле ввода.
+func uncoveredCols(s string) []int {
+	st := sgrState{}
+	var gaps []int
+	col := 0
+	rest := s
+	for len(rest) > 0 {
+		if rest[0] == '\x1b' {
+			if len(rest) > 1 && rest[1] == '[' {
+				end := strings.IndexByte(rest, 'm')
+				if end < 0 {
+					break
+				}
+				st.apply(strings.Split(rest[2:end], ";"))
+				rest = rest[end+1:]
+				continue
+			}
+			rest = rest[1:]
+			continue
+		}
+		_, sz := utf8.DecodeRuneInString(rest)
+		if !st.hasBG && !st.rev {
+			gaps = append(gaps, col)
+		}
+		col++
+		rest = rest[sz:]
+	}
+	return gaps
+}
+
+// п.1 задачи 0039: фон панели сообщений не должен обрываться ни на одной
+// строке карточки (рамка, имя, время, глифы, текст, паддинги, доливка до
+// ширины ленты). Проверяет оба режима выравнивания: ведущие пробелы у
+// сдвигаемых к правому краю своих карточек идуворотом тоже закрашены.
+func TestRenderMessagesBackgroundsContiguous(t *testing.T) {
+	msgs := []auth.Message{
+		{ID: 1, SenderName: "Вы", Text: "моё", Date: 100, IsOutgoing: true},
+		{ID: 2, SenderName: "Ирина", Text: "привет", Date: 101},
+	}
+	for _, align := range []bool{false, true} {
+		content, _ := renderMessages(msgs, 40, align, 0, defaultTheme(), 1400)
+		for _, line := range strings.Split(content, "\n") {
+			if line == "" {
+				continue
+			}
+			if cols := uncoveredCols(line); len(cols) > 0 {
+				t.Errorf("renderMessages(align=%v): uncovered columns %v (фон терминала): %q", align, cols, line)
+			}
+		}
+	}
+}
+
+// п.3 задачи 0039: заголовки панелей — сплошной чёрный фон хрома.
+func TestPaneTitleBackgroundsContiguous(t *testing.T) {
+	th := defaultTheme()
+	for _, args := range []struct {
+		width   int
+		num     int
+		text    string
+		focused bool
+	}{
+		{24, 1, "Папки", true},
+		{24, 2, "Чаты", false},
+		{40, 3, "Чат", true},
+	} {
+		s := paneTitle(args.width, args.num, args.text, args.focused, th)
+		if cols := uncoveredCols(s); len(cols) > 0 {
+			t.Errorf("paneTitle(%d, %d, %q, %v): uncovered columns %v: %q", args.width, args.num, args.text, args.focused, cols, s)
+		}
+	}
+}
+
+// п.3 задачи 0039: нижняя строка (лого, теги режимов, хоткей-подсказки) —
+// сплошной чёрный фон в обоих режимах, где она рендерится с вложенными
+// стилями (Normal и Command с вводом команды).
+func TestBottomLineBackgroundsContiguous(t *testing.T) {
+	for name, prepare := range map[string]func(*Model){
+		"normal": func(*Model) {},
+		"command": func(m *Model) {
+			*m, _ = updateModel(*m, keyRune(':'))
+		},
+	} {
+		m := testModel(t, nil)
+		m.version = "v0.4.2"
+		prepare(&m)
+		got := m.bottomLine()
+		for _, line := range strings.Split(got, "\n") {
+			if line == "" {
+				continue
+			}
+			if cols := uncoveredCols(line); len(cols) > 0 {
+				t.Errorf("bottomLine (%s): uncovered columns %v (фон терминала): %q", name, cols, line)
+			}
 		}
 	}
 }
@@ -543,7 +718,7 @@ func TestRenderMessagesAlignOwnRightNarrowWidthDoesNotOverflow(t *testing.T) {
 	for _, sender := range []string{"Вы", "Александра"} {
 		msgs := []auth.Message{{ID: 1, SenderName: sender, Text: "моё сообщение подлиннее", Date: 100, IsOutgoing: true}}
 		for width := 3; width <= 30; width++ {
-			got, _ := renderMessages(msgs, width, true, 0, defaultTheme())
+			got, _ := renderMessages(msgs, width, true, 0, defaultTheme(), 0)
 			for _, line := range strings.Split(got, "\n") {
 				if line == "" {
 					continue
@@ -564,7 +739,7 @@ func TestRenderMessagesAlignOwnRightNarrowWidthDoesNotOverflow(t *testing.T) {
 // не гарантирует соблюдение инварианта ширины (осознанный, а не забытый предел).
 func TestRenderMessageCardNarrowWidthLineWidthsMatch(t *testing.T) {
 	for _, width := range []int{3, 4, 5, 6, 8} {
-		got := renderMessageCard(auth.Message{ID: 1, SenderName: "?", Text: "x", Date: 100}, width, false, false, defaultTheme())
+		got := renderMessageCard(auth.Message{ID: 1, SenderName: "?", Text: "x", Date: 100}, width, false, false, defaultTheme(), 0)
 		for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
 			if line == "" {
 				continue
@@ -574,6 +749,78 @@ func TestRenderMessageCardNarrowWidthLineWidthsMatch(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Глиф прочтения на своих сообщениях: "✓" (Faint) — отправлено, но ещё не
+// прочитано; "✓✓" (OwnColor) — прочитано; на чужих сообщениях глифа нет
+// вообще (в реальном Telegram галочки есть только на своих сообщениях).
+// Проверяется через renderMessageCard напрямую — глиф живёт в верхней линии
+// карточки рядом со временем.
+func TestRenderMessageCardReadGlyphs(t *testing.T) {
+	th := defaultTheme()
+	// ANSI-префикс OwnColor не хардкодим (см. chatSelectionColorANSI выше):
+	// берём префикс из рендера эталонной строки тем же стилем.
+	ownGlyph, ownGlyphPrefix := readGlyphANSI(t, th)
+
+	cases := []struct {
+		name     string
+		msg      auth.Message
+		lastRead int64
+		want     string // обязана присутствовать
+		notWant  string // обязана отсутствовать
+		colored  bool   // глиф обязан нести ANSI-префикс OwnColor
+	}{
+		{
+			name:     "unread own message shows single check",
+			msg:      auth.Message{ID: 1, SenderName: "Вы", Text: "привет", Date: 100, IsOutgoing: true},
+			lastRead: 0,
+			want:     "✓",
+			notWant:  "✓✓",
+		},
+		{
+			name:     "read own message shows double check",
+			msg:      auth.Message{ID: 1, SenderName: "Вы", Text: "привет", Date: 100, IsOutgoing: true},
+			lastRead: 5,
+			want:     "✓✓",
+			colored:  true,
+		},
+		{
+			name:     "foreign message shows no check",
+			msg:      auth.Message{ID: 2, SenderName: "Ирина", Text: "привет", Date: 101},
+			lastRead: 5,
+			notWant:  "✓",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderMessageCard(tc.msg, 40, false, false, th, tc.lastRead)
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("expected %q in card:\n%s", tc.want, got)
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Errorf("unexpected %q in card:\n%s", tc.notWant, got)
+			}
+			if tc.colored {
+				// Прочитанное — акцентом OwnColor, не приглушённым Faint.
+				if !strings.Contains(got, ownGlyphPrefix+ownGlyph) {
+					t.Errorf("expected read glyph colored with OwnColor, got:\n%s", got)
+				}
+			}
+		})
+	}
+}
+
+// readGlyphANSI возвращает глиф "✓✓" и ANSI-префикс, которым lipgloss
+// открывает рендер глифа стилем OwnColor (та же идея, что
+// chatSelectionColorANSI) — не парсим ANSI-коды руками.
+func readGlyphANSI(t *testing.T, th Theme) (string, string) {
+	t.Helper()
+	glyph := "✓✓"
+	// Глиф в карточке рендерится фоном панели (фикс 0039) — эталонный префикс
+	// строим тем же двойным стилем, что и карточка: fg=OwnColor + bg=панели.
+	ref := lipgloss.NewStyle().Foreground(th.OwnColor).Background(messagePanelBg()).Render(glyph)
+	return glyph, ref[:strings.Index(ref, glyph)]
 }
 
 func TestModeNormalToCommand(t *testing.T) {
@@ -624,6 +871,153 @@ func TestModeCommandHelpOpensHelpScreen(t *testing.T) {
 	m, _ = updateModel(m, keyRune('h'))
 	if m.mode != modeNormal {
 		t.Fatalf("expected modeNormal after 'h' from help screen, got %v", m.mode)
+	}
+}
+
+// TestModeAboutHotkeyOpensAndCloses — 't' (About) из Normal открывает modeAbout
+// и запускает ПЕРВЫЙ тик анимации (не-nil tea.Cmd), повторный 't' закрывает
+// назад в modeNormal (тот же принцип toggle, что у modeHelp) и не возвращает
+// команд — анимация больше не планируется.
+func TestModeAboutHotkeyOpensAndCloses(t *testing.T) {
+	m := testModel(t, nil)
+	if m.mode != modeNormal {
+		t.Fatalf("setup: expected modeNormal, got %v", m.mode)
+	}
+
+	m, cmd := updateModel(m, keyRune('t'))
+	if m.mode != modeAbout {
+		t.Fatalf("expected modeAbout after 't', got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil first tick cmd after opening about")
+	}
+
+	m, cmd = updateModel(m, keyRune('t'))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on closing about by repeated 't', got %v", cmd)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after repeated 't', got %v", m.mode)
+	}
+}
+
+// TestModeAboutEscCloses — Esc закрывает modeAbout назад в modeNormal так же,
+// как повторный хоткей, и без возвращаемых команд.
+func TestModeAboutEscCloses(t *testing.T) {
+	m := testModel(t, nil)
+	m, _ = updateModel(m, keyRune('t'))
+	if m.mode != modeAbout {
+		t.Fatalf("setup: expected modeAbout, got %v", m.mode)
+	}
+
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on esc from about, got %v", cmd)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after esc, got %v", m.mode)
+	}
+}
+
+// TestAboutTickResubscribesOnlyInAboutMode — tea.Tick в modeAbout сдвигает
+// колонку блика (m.aboutTickCol) и переподписывается (не-nil cmd). Тик,
+// пришедший вне modeAbout, ничего не меняет и НЕ переподписывается (cmd == nil)
+// — при выходе с экрана анимация естественно прекращается.
+func TestAboutTickResubscribesOnlyInAboutMode(t *testing.T) {
+	m := testModel(t, nil)
+	m.mode = modeAbout
+
+	m, cmd := updateModel(m, aboutTickMsg(3))
+	if cmd == nil {
+		t.Fatal("expected non-nil resubscription cmd while in modeAbout")
+	}
+	if m.aboutTickCol != 3 {
+		t.Fatalf("expected aboutTickCol 3, got %d", m.aboutTickCol)
+	}
+
+	m = testModel(t, nil) // сброс в modeNormal
+	m, cmd = updateModel(m, aboutTickMsg(7))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd for about tick outside modeAbout, got %v", cmd)
+	}
+	if m.aboutTickCol != 0 {
+		t.Fatalf("aboutTickCol must stay untouched outside modeAbout, got %d", m.aboutTickCol)
+	}
+}
+
+// TestAboutScreenShowsLiveVersion — версия на экране «о программе» берётся из
+// m.version (живое значение модели), а не из захардкоженной строки: задаём
+// заведомо нестандартную версию и проверяем её появление в отрендеренном UI.
+// Заодно — ключевые контентные блоки экрана (описание, ссылка, автор,
+// благодарность, footer закрытия, глифы логотипа).
+func TestAboutScreenShowsLiveVersion(t *testing.T) {
+	m := testModel(t, nil)
+	m.version = "v9.9.9-rc1"
+	m.mode = modeAbout
+
+	view := m.View()
+	for _, want := range []string{
+		"v9.9.9-rc1",
+		"Терминальный клиент Telegram с vim-подобной модальностью ввода",
+		"github.com/zeroscrypt/telecli",
+		"@zeroscrypt",
+		"@hakatao",
+		"Esc / t — закрыть",
+		"█",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("about screen missing %q:\n%s", want, view)
+		}
+	}
+}
+
+// stripANSI вырезает ANSI-SGR-последовательности (`\x1b[…m`) из строки —
+// вспомогательная функция только для тестов: чтобы мерить "чистую" форму
+// логотипа поверх цветного рендера lipgloss (TestMain форсирует TrueColor,
+// ANSI-коды в рендере присутствуют).
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if inEscape {
+			if r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// TestRenderAboutBannerShape — геометрия ASCII-логотипа TELECLi: ровно 6 строк
+// шириной 41 колонка (7 букв × 5 + 6 разделителей), каждая строка содержит
+// только глиф '█' и пробелы; сдвиг блика не меняет саму форму (колонки
+// подсветки просто перекрашиваются, набор '█' по столбцам фиксирован).
+func TestRenderAboutBannerShape(t *testing.T) {
+	m := testModel(t, nil)
+
+	for _, tick := range []int{0, 1, 20, 40, 41, 1000} {
+		lines := m.renderAboutBanner(tick)
+		if len(lines) != 6 {
+			t.Fatalf("tick %d: expected 6 banner lines, got %d", tick, len(lines))
+		}
+		for _, line := range lines {
+			// ANSI-коды цветов убираем, чтобы мерить "чистую" форму логотипа.
+			plain := stripANSI(line)
+			if lipgloss.Width(plain) != 41 {
+				t.Errorf("tick %d: banner line width %d != 41: %q", tick, lipgloss.Width(plain), plain)
+			}
+			for _, r := range plain {
+				if r != '█' && r != ' ' {
+					t.Errorf("tick %d: banner line has unexpected rune %q: %q", tick, r, plain)
+				}
+			}
+		}
 	}
 }
 
@@ -1261,26 +1655,6 @@ func TestChatCursorHighlightUsesSelectionColors(t *testing.T) {
 	}
 }
 
-// spaceOutRunes вставляет ровно один пробел между каждая парой рун: "ABC" с
-// достаточным бюджетом становится "A B C".
-func TestSpaceOutRunesInsertsSingleSpaces(t *testing.T) {
-	if got := spaceOutRunes("ABC", 10); got != "A B C" {
-		t.Fatalf("spaceOutRunes('ABC', 10) = %q, want 'A B C'", got)
-	}
-}
-
-// Выход за бюджет — обрезка с многоточием на месте последнего разделителя:
-// результат не шире бюджета и заканчивается на "…".
-func TestSpaceOutRunesTruncatesWithEllipsis(t *testing.T) {
-	got := spaceOutRunes("ПАПКИ", 5)
-	if w := lipgloss.Width(got); w > 5 {
-		t.Fatalf("spaceOutRunes('ПАПКИ', 5) width %d > 5: %q", w, got)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Fatalf("spaceOutRunes('ПАПКИ', 5) must end with '…', got: %q", got)
-	}
-}
-
 // Заголовок панели начинается с номера-хоткея в квадратных скобках.
 func TestPaneTitleShowsNumberPrefix(t *testing.T) {
 	th := defaultTheme()
@@ -1292,16 +1666,31 @@ func TestPaneTitleShowsNumberPrefix(t *testing.T) {
 	}
 }
 
-// Название в заголовке приводится к капсу с разрядкой — исходные строчные
-// буквы в рендере не остаются.
-func TestPaneTitleUppercasesAndSpacesName(t *testing.T) {
+// Название в заголовке приводится к капсу, без разрядки между буквами —
+// исходные строчные буквы в рендере не остаются.
+func TestPaneTitleUppercasesWithoutSpacingName(t *testing.T) {
 	th := defaultTheme()
 	got := paneTitle(30, 1, "чаты", true, th)
-	if !strings.Contains(got, "Ч А Т Ы") {
-		t.Errorf("paneTitle(30, 1, 'чаты', true) must contain 'Ч А Т Ы', got: %q", got)
+	if !strings.Contains(got, "ЧАТЫ") {
+		t.Errorf("paneTitle(30, 1, 'чаты', true) must contain 'ЧАТЫ', got: %q", got)
+	}
+	if strings.Contains(got, "Ч А Т Ы") {
+		t.Errorf("paneTitle must not space out letters, got: %q", got)
 	}
 	if strings.Contains(got, "чаты") {
 		t.Errorf("paneTitle must not contain the original lowercase name, got: %q", got)
+	}
+}
+
+// Длинное название обрезается по ширине с многоточием на конце, без разрядки.
+func TestPaneTitleTruncatesLongNameWithEllipsis(t *testing.T) {
+	th := defaultTheme()
+	got := paneTitle(10, 3, "Очень длинное название чата", true, th)
+	if w := lipgloss.Width(got); w != 10 {
+		t.Fatalf("paneTitle(10, ...) width = %d, want 10: %q", w, got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("paneTitle must truncate long name with '…', got: %q", got)
 	}
 }
 
@@ -1330,6 +1719,271 @@ func TestFocusPaneHotkeysJumpDirectly(t *testing.T) {
 		if m.focus != focusChats {
 			t.Fatalf("'2' from %v: expected focusChats, got %v", start, m.focus)
 		}
+	}
+}
+
+// TestCollapseHotkeyAcrossFocusCombos — матрица из четырёх комбинаций
+// фокуса/свёрнутости для каждой из сворачиваемых панелей (1 и 2): цифра
+// панели НЕ в фокусе — фокус на неё (+ авторазворот, если свёрнута); цифра
+// панели уже в фокусе — toggle свёрнутости.
+func TestCollapseHotkeyAcrossFocusCombos(t *testing.T) {
+	cases := []struct {
+		name         string
+		hotkey       rune
+		collapsed    func(*Model) bool
+		setCollapsed func(*Model, bool)
+		matrix       []struct {
+			name          string
+			setup         func(*Model)
+			wantFocus     focus
+			wantCollapsed bool
+		}
+	}{
+		{
+			name:   "folders",
+			hotkey: '1',
+			collapsed: func(m *Model) bool {
+				return m.foldersCollapsed
+			},
+			setCollapsed: func(m *Model, v bool) {
+				m.foldersCollapsed = v
+			},
+			matrix: []struct {
+				name          string
+				setup         func(*Model)
+				wantFocus     focus
+				wantCollapsed bool
+			}{
+				{"not focused + expanded", func(m *Model) { m.focus = focusChats }, focusFolders, false},
+				{"not focused + collapsed", func(m *Model) { m.focus = focusChats; m.foldersCollapsed = true }, focusFolders, false},
+				{"focused + expanded", func(m *Model) { m.focus = focusFolders }, focusFolders, true},
+				{"focused + collapsed", func(m *Model) { m.focus = focusFolders; m.foldersCollapsed = true }, focusFolders, false},
+			},
+		},
+		{
+			name:   "chats",
+			hotkey: '2',
+			collapsed: func(m *Model) bool {
+				return m.chatsCollapsed
+			},
+			setCollapsed: func(m *Model, v bool) {
+				m.chatsCollapsed = v
+			},
+			matrix: []struct {
+				name          string
+				setup         func(*Model)
+				wantFocus     focus
+				wantCollapsed bool
+			}{
+				{"not focused + expanded", func(m *Model) { m.focus = focusMessages }, focusChats, false},
+				{"not focused + collapsed", func(m *Model) { m.focus = focusMessages; m.chatsCollapsed = true }, focusChats, false},
+				{"focused + expanded", func(m *Model) { m.focus = focusChats }, focusChats, true},
+				{"focused + collapsed", func(m *Model) { m.focus = focusChats; m.chatsCollapsed = true }, focusChats, false},
+			},
+		},
+	}
+	for _, c := range cases {
+		for _, tc := range c.matrix {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				m := testModel(t, []auth.Chat{{ID: 1, Title: "A"}})
+				tc.setup(&m)
+				m, _ = updateModel(m, keyRune(c.hotkey))
+				if m.focus != tc.wantFocus {
+					t.Errorf("'%c': focus = %v, want %v", c.hotkey, m.focus, tc.wantFocus)
+				}
+				if c.collapsed(&m) != tc.wantCollapsed {
+					t.Errorf("'%c': collapsed = %v, want %v", c.hotkey, c.collapsed(&m), tc.wantCollapsed)
+				}
+			})
+		}
+	}
+}
+
+// TestFocusPane3NeverTouchesCollapsedState — хоткей панели 3 не трогает
+// сворачиваемые панели ни при каких условиях (свёрнутость оставляем как есть
+// даже в несфокусированном состоянии).
+func TestFocusPane3NeverTouchesCollapsedState(t *testing.T) {
+	for _, start := range []focus{focusFolders, focusChats, focusMessages} {
+		m := testModel(t, nil)
+		m.focus = start
+		m.foldersCollapsed = true
+		m.chatsCollapsed = true
+		m, _ = updateModel(m, keyRune('3'))
+		if m.focus != focusMessages {
+			t.Fatalf("'3' from %v: expected focusMessages, got %v", start, m.focus)
+		}
+		if !m.foldersCollapsed || !m.chatsCollapsed {
+			t.Errorf("'3' from %v must not touch collapsed state, folders=%v chats=%v", start, m.foldersCollapsed, m.chatsCollapsed)
+		}
+	}
+}
+
+// TestCollapseHotkeyAdjustsViewportWidth — сворачивание панели увеличивает
+// m.viewport.Width ровно на её освободившуюся ширину (foldersPaneW-
+// collapsedPaneW / chatsPaneW-collapsedPaneW) — сравниваем applyLayout
+// до и после переключения, не константы «на глаз».
+func TestCollapseHotkeyAdjustsViewportWidth(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "A"}})
+	m.applyLayout()
+	widthExpanded := m.viewport.Width
+
+	// Панель 1 (папки): testModel начинает с focusFolders, «1» сворачивает её.
+	m, _ = updateModel(m, keyRune('1'))
+	if !m.foldersCollapsed {
+		t.Fatal("'1' with focusFolders must collapse folders pane")
+	}
+	m.applyLayout()
+	if got, want := m.viewport.Width, widthExpanded+foldersPaneW-collapsedPaneW; got != want {
+		t.Errorf("folders collapse: viewport.Width = %d, want %d", got, want)
+	}
+
+	// Развернуть обратно и то же самое для панели 2 (чаты).
+	m, _ = updateModel(m, keyRune('1'))
+	if m.foldersCollapsed {
+		t.Fatal("'1' again with focusFolders must expand folders pane")
+	}
+	m.applyLayout()
+	widthExpanded = m.viewport.Width
+	m.focus = focusChats
+	m, _ = updateModel(m, keyRune('2'))
+	if !m.chatsCollapsed {
+		t.Fatal("'2' with focusChats must collapse chats pane")
+	}
+	m.applyLayout()
+	if got, want := m.viewport.Width, widthExpanded+chatsPaneW-collapsedPaneW; got != want {
+		t.Errorf("chats collapse: viewport.Width = %d, want %d", got, want)
+	}
+}
+
+// TestCollapsedPaneTitleHeader — заголовок свёрнутой панели: только "[N]"
+// (те же аргументы paneTitle, что использует View() для свёрнутого вида), без
+// названия и без scroll-индикатора.
+func TestCollapsedPaneTitleHeader(t *testing.T) {
+	m := testModel(t, nil)
+	m.foldersCollapsed = true
+	m.chatsCollapsed = true
+	titles := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{"folders", paneTitle(m.foldersPaneWidth(), 1, "", m.focus == focusFolders, m.theme), "[1]"},
+		{"chats", paneTitle(m.chatsPaneWidth(), 2, "", m.focus == focusChats, m.theme), "[2]"},
+	}
+	for _, tc := range titles {
+		if !strings.Contains(tc.title, tc.want) {
+			t.Errorf("%s collapsed title must contain %q, got: %q", tc.name, tc.want, tc.title)
+		}
+		// Для свёрнутой панели text == "" — названия в заголовке быть не
+		// может; scroll-индикатор не передаётся вовсе (0 аргументов вариадика).
+		for _, forbidden := range []string{"ПАПКИ", "ЧАТЫ", "▲", "▼", "⇅"} {
+			if strings.Contains(tc.title, forbidden) {
+				t.Errorf("%s collapsed title must not contain %q, got: %q", tc.name, forbidden, tc.title)
+			}
+		}
+	}
+}
+
+// TestCollapsedPanelInView — свёрнутая папка в живом View: заголовочная
+// строка начинается с "[1]" без названия и без scroll-индикатора, полного
+// слова «ПАПКИ» в кадре нет (буквы уходят в тело панели по одной на строку).
+func TestCollapsedPanelInView(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "A"}})
+	m, _ = updateModel(m, keyRune('1')) // focusFolders + «1» — сворачиваем папки
+	if !m.foldersCollapsed {
+		t.Fatal("'1' must collapse folders pane")
+	}
+	view := m.View()
+	titleRow := strings.SplitN(view, "\n", 2)[0]
+	if !strings.Contains(titleRow, "[1]") {
+		t.Errorf("collapsed folders title row must contain [1], got: %q", titleRow)
+	}
+	if strings.Contains(titleRow, "ПАПКИ") {
+		t.Errorf("collapsed folders title row must not contain the name, got: %q", titleRow)
+	}
+	for _, g := range []string{"▲", "▼", "⇅"} {
+		if strings.Contains(titleRow, g) {
+			t.Errorf("collapsed folders title row must not contain scroll indicator %q, got: %q", g, titleRow)
+		}
+	}
+	if strings.Contains(view, "ПАПКИ") {
+		t.Errorf("collapsed folders frame must not contain the full name, got: %q", view)
+	}
+}
+
+// TestCollapsedPaneBodyVerticalName — тело свёрнутой панели: первая строка
+// содержимого пустая, дальше — по одной букве капсом на строку в исходном
+// порядке (каждая строка добита до collapsedPaneContentW пробелами).
+func TestCollapsedPaneBodyVerticalName(t *testing.T) {
+	tests := []struct {
+		name string
+		want []string
+	}{
+		{"Чаты", []string{"", "Ч", "А", "Т", "Ы"}},
+		{"Folders", []string{"", "F", "O", "L", "D", "E", "R", "S"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collapsedPaneBody(tc.name, 20)
+			lines := strings.Split(got, "\n")
+			if len(lines) != len(tc.want) {
+				t.Fatalf("collapsedPaneBody(%q, 20) = %d lines, want %d: %q", tc.name, len(lines), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if trimmed := strings.TrimRight(lines[i], " "); trimmed != tc.want[i] {
+					t.Errorf("line %d = %q, want %q", i, lines[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestCollapsedPaneBodyHeightTruncation — обрезка по высоте: при
+// contentRows меньше 1+len(letters) функции не паникует и возвращает не
+// больше contentRows строк (лишние буквы с конца названия обрезаются).
+func TestCollapsedPaneBodyHeightTruncation(t *testing.T) {
+	for _, rows := range []int{-1, 0, 1, 2, 3, 6, 10} {
+		got := collapsedPaneBody("Папки", rows) // 5 букв + 1 пустая = 6 строк
+		if rows <= 0 {
+			if got != "" {
+				t.Errorf("rows=%d: want empty body, got %q", rows, got)
+			}
+			continue
+		}
+		lines := strings.Split(got, "\n")
+		if len(lines) > rows {
+			t.Errorf("rows=%d: %d lines returned, want <= %d: %q", rows, len(lines), rows, got)
+		}
+	}
+}
+
+// TestCollapsedPaneTitleWidthMatchesPaneWidth — ширина заголовка свёрнутой
+// панели равна ширине её тела (тот же класс проверки, что у
+// TestPaneTitleWidthMatchesPaneWidth) — и та и другая равны collapsedPaneW.
+func TestCollapsedPaneTitleWidthMatchesPaneWidth(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "A"}})
+	m.foldersCollapsed = true
+	m.chatsCollapsed = true
+
+	columns := []struct {
+		name  string
+		title string
+		pane  string
+	}{
+		{"folders", paneTitle(m.foldersPaneWidth(), 1, "", m.focus == focusFolders, m.theme), m.foldersPane()},
+		{"chats", paneTitle(m.chatsPaneWidth(), 2, "", m.focus == focusChats, m.theme), m.chatPane()},
+	}
+	for _, c := range columns {
+		t.Run(c.name, func(t *testing.T) {
+			titleW := lipgloss.Width(strings.SplitN(c.title, "\n", 2)[0])
+			paneW := lipgloss.Width(strings.SplitN(c.pane, "\n", 2)[0])
+			if titleW != paneW {
+				t.Errorf("title line width %d != pane line width %d (title=%q, pane=%q)", titleW, paneW, c.title, c.pane)
+			}
+			if titleW != collapsedPaneW {
+				t.Errorf("collapsed %s title width = %d, want collapsedPaneW %d", c.name, titleW, collapsedPaneW)
+			}
+		})
 	}
 }
 
@@ -1479,7 +2133,7 @@ func TestWaitForMessageUpdateDoesNotJumpToBottomWhileScrolledUp(t *testing.T) {
 		{ID: 2, Text: longText, SenderName: "Собеседник", Date: 101},
 	}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme())
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme(), 0)
 	m.viewport.SetContent(content)
 	m.viewport.SetYOffset(0) // прокрутили наверх, читаем историю
 	if m.viewport.AtBottom() {
@@ -1503,7 +2157,7 @@ func TestWaitForMessageUpdateStillJumpsToBottomWhenAlreadyThere(t *testing.T) {
 	m.displayedChat = 111
 	m.messages = []auth.Message{{ID: 1, Text: "первое", SenderName: "Вы", Date: 100}}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme())
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme(), 0)
 	m.viewport.SetContent(content)
 	m.viewport.GotoBottom()
 
@@ -2301,18 +2955,16 @@ func TestFocusLeftMovesThroughPanesWithoutWrapping(t *testing.T) {
 }
 
 // TestViewIncludesPaneTitles — у каждой панели есть строка-заголовок НАД ней
-// (первая строка View): «[1] П А П К И», «[2] Ч А Т Ы», а у панели сообщений —
+// (первая строка View): «[1] ПАПКИ», «[2] ЧАТЫ», а у панели сообщений —
 // название открытого чата (или «Сообщения», пока ничего не выбрано); названия
-// капсом с разрядкой (формат из 0023).
+// капсом, без разрядки между буквами.
 func TestViewIncludesPaneTitles(t *testing.T) {
 	chats := []auth.Chat{{ID: 111, Title: "Тестовый чат"}}
 	m := testModel(t, chats)
 
 	// displayedChat == 0 — заголовок панели сообщений статичный «Сообщения».
 	titleRow := strings.SplitN(m.View(), "\n", 2)[0]
-	// Заголовки — капсом с разрядкой («[1] П А П К И» и т.п.), проверяем
-	// разряженные подстроки вместо исходных слов.
-	for _, want := range []string{"[1] П А П К И", "[2] Ч А Т Ы", "С О О Б Щ Е Н И Я"} {
+	for _, want := range []string{"[1] ПАПКИ", "[2] ЧАТЫ", "СООБЩЕНИЯ"} {
 		if !strings.Contains(titleRow, want) {
 			t.Errorf("title row missing %q, got:\n%s", want, titleRow)
 		}
@@ -2322,7 +2974,7 @@ func TestViewIncludesPaneTitles(t *testing.T) {
 	m.displayedChat = 111
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: "hi", Date: 100}}
 	titleRow = strings.SplitN(m.View(), "\n", 2)[0]
-	if !strings.Contains(titleRow, "Т Е С Т О В Ы Й") {
+	if !strings.Contains(titleRow, "ТЕСТОВЫЙ") {
 		t.Errorf("title row must show open chat name after selection, got:\n%s", titleRow)
 	}
 }
@@ -2901,7 +3553,7 @@ func TestMessageCursorSelectedCardUsesDoubleBorder(t *testing.T) {
 		{ID: 3, SenderName: "В", Text: "третье", Date: 102},
 	}
 
-	content, _ := renderMessages(msgs, 60, false, 1, defaultTheme())
+	content, _ := renderMessages(msgs, 60, false, 1, defaultTheme(), 0)
 	cards := strings.Split(content, "\n\n")
 	if len(cards) != 3 {
 		t.Fatalf("expected 3 cards, got %d:\n%s", len(cards), content)
@@ -2936,7 +3588,7 @@ func TestRenderMessagesLineOffsetsMatchActualLines(t *testing.T) {
 		{ID: 3, SenderName: "Вы", Text: "ещё одно", Date: 102},
 	}
 
-	content, offsets := renderMessages(msgs, 60, false, 1, defaultTheme())
+	content, offsets := renderMessages(msgs, 60, false, 1, defaultTheme(), 0)
 	lines := strings.Split(content, "\n")
 	if len(offsets) != len(msgs) {
 		t.Fatalf("expected %d offsets, got %d", len(msgs), len(offsets))
@@ -2968,7 +3620,7 @@ func TestRerenderScrollsToCursorWhenAboveView(t *testing.T) {
 		{ID: 4, SenderName: "А", Text: "сообщение четыре", Date: 103},
 	}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme())
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme(), 0)
 	m.viewport.SetContent(content)
 	m.viewport.GotoBottom()
 	if m.viewport.YOffset == 0 {
@@ -2998,7 +3650,7 @@ func TestRerenderScrollsToCursorWhenBelowView(t *testing.T) {
 		{ID: 4, SenderName: "А", Text: strings.Repeat("длинный текст ", 8), Date: 103},
 	}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, len(m.messages)-1, defaultTheme())
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, len(m.messages)-1, defaultTheme(), 0)
 	m.viewport.SetContent(content)
 	m.viewport.SetYOffset(0)
 	if m.viewport.AtBottom() {

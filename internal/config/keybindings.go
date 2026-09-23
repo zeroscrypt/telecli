@@ -28,6 +28,7 @@ type KeyBindings struct {
 	Search       []string `toml:"search"`
 	ShowHelp     []string `toml:"show_help"`
 	DeleteChat   []string `toml:"delete_chat"`
+	About        []string `toml:"about"`
 }
 
 func DefaultKeyBindings() KeyBindings {
@@ -49,6 +50,7 @@ func DefaultKeyBindings() KeyBindings {
 		Search:       []string{"/"},
 		ShowHelp:     []string{"h"},
 		DeleteChat:   []string{"d"},
+		About:        []string{"t"},
 	}
 }
 
@@ -151,6 +153,9 @@ func LoadKeyBindings() (KeyBindings, error) {
 	}
 	if len(fileKeys.DeleteChat) > 0 {
 		keys.DeleteChat = fileKeys.DeleteChat
+	}
+	if len(fileKeys.About) > 0 {
+		keys.About = fileKeys.About
 	}
 	return keys, nil
 }
