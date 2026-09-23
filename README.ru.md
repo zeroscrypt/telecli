@@ -25,7 +25,7 @@
 ```sh
 mkdir -p ~/.local/bin
 curl -fsSL -o ~/.local/bin/telecli https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-darwin-arm64
-chmod +x ~/.local/bin/telecli
+chmod 755 ~/.local/bin/telecli
 ```
 
 Если `~/.local/bin` ещё не в вашем `PATH` — добавьте эту строку в `~/.zshrc` (или `~/.bashrc`) и
@@ -46,7 +46,7 @@ Gatekeeper файл не карантинит, лишнего шага «раз�
 ```sh
 mkdir -p ~/.local/bin
 curl -fsSL -o ~/.local/bin/telecli https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-linux-amd64
-chmod +x ~/.local/bin/telecli
+chmod 755 ~/.local/bin/telecli
 ```
 
 Если `~/.local/bin` ещё не в вашем `PATH` — добавьте эту строку в `~/.bashrc` (или аналог для вашей

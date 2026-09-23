@@ -25,7 +25,7 @@ Three ways to get `telecli`, pick one:
 ```sh
 mkdir -p ~/.local/bin
 curl -fsSL -o ~/.local/bin/telecli https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-darwin-arm64
-chmod +x ~/.local/bin/telecli
+chmod 755 ~/.local/bin/telecli
 ```
 
 If `~/.local/bin` isn't already in your `PATH`, add this line to `~/.zshrc` (or `~/.bashrc`) and
@@ -45,7 +45,7 @@ To reinstall/update later, run the same three lines again — `curl -o` overwrit
 ```sh
 mkdir -p ~/.local/bin
 curl -fsSL -o ~/.local/bin/telecli https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-linux-amd64
-chmod +x ~/.local/bin/telecli
+chmod 755 ~/.local/bin/telecli
 ```
 
 If `~/.local/bin` isn't already in your `PATH`, add this line to `~/.bashrc` (or your shell's
