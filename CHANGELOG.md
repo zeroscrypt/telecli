@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/zeroscrypt/telecli/compare/v1.0.0...v1.1.0) (2026-09-23)
+
+
+### Features
+
+* :update install — download and install available updates ([3256858](https://github.com/zeroscrypt/telecli/commit/32568580bdc2e6d54a624dae0c850909ace0dd85))
+
 ## 1.0.0 (2026-09-23)
 
 
