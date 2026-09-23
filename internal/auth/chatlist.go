@@ -6,8 +6,10 @@ import (
 )
 
 type Chat struct {
-	ID    int64
-	Title string
+	ID          int64
+	Title       string
+	UnreadCount int32
+	IsGroup     bool // true — группа/канал (leaveChat), false — личный/секретный чат (deleteChatHistory)
 }
 
 // GetChats загружает до limit чатов из указанного списка (chatList — сырой
@@ -63,9 +65,19 @@ func GetChats(ctx context.Context, client TDClientInterface, chatList map[string
 			continue
 		}
 		title, _ := chatResp["title"].(string)
+		unreadCount, _ := chatResp["unread_count"].(float64)
+		isGroup := false
+		if typeRaw, ok := chatResp["type"].(map[string]interface{}); ok {
+			switch typeRaw["@type"] {
+			case "chatTypeBasicGroup", "chatTypeSupergroup":
+				isGroup = true
+			}
+		}
 		chats = append(chats, Chat{
-			ID:    int64(chatID),
-			Title: title,
+			ID:          int64(chatID),
+			Title:       title,
+			UnreadCount: int32(unreadCount),
+			IsGroup:     isGroup,
 		})
 	}
 

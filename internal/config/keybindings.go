@@ -24,8 +24,10 @@ type KeyBindings struct {
 	EnterInsert  []string `toml:"enter_insert"`
 	EnterCommand []string `toml:"enter_command"`
 	Quit         []string `toml:"quit"`
-	OpenEditor   []string `toml:"open_editor"`
 	SendFile     []string `toml:"send_file"`
+	Search       []string `toml:"search"`
+	ShowHelp     []string `toml:"show_help"`
+	DeleteChat   []string `toml:"delete_chat"`
 }
 
 func DefaultKeyBindings() KeyBindings {
@@ -43,8 +45,10 @@ func DefaultKeyBindings() KeyBindings {
 		EnterInsert:  []string{"i"},
 		EnterCommand: []string{":"},
 		Quit:         []string{"q", "ctrl+c"},
-		OpenEditor:   []string{"ctrl+e"},
 		SendFile:     []string{"ctrl+f"},
+		Search:       []string{"/"},
+		ShowHelp:     []string{"t"},
+		DeleteChat:   []string{"d"},
 	}
 }
 
@@ -136,11 +140,17 @@ func LoadKeyBindings() (KeyBindings, error) {
 	if len(fileKeys.Quit) > 0 {
 		keys.Quit = fileKeys.Quit
 	}
-	if len(fileKeys.OpenEditor) > 0 {
-		keys.OpenEditor = fileKeys.OpenEditor
-	}
 	if len(fileKeys.SendFile) > 0 {
 		keys.SendFile = fileKeys.SendFile
+	}
+	if len(fileKeys.Search) > 0 {
+		keys.Search = fileKeys.Search
+	}
+	if len(fileKeys.ShowHelp) > 0 {
+		keys.ShowHelp = fileKeys.ShowHelp
+	}
+	if len(fileKeys.DeleteChat) > 0 {
+		keys.DeleteChat = fileKeys.DeleteChat
 	}
 	return keys, nil
 }

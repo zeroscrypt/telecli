@@ -34,17 +34,17 @@ func TestLoadSettingsPartialOverride(t *testing.T) {
 	_, cleanup := setupSettingsTest(t)
 	defer cleanup()
 
-	writeSettingsFile(t, "editor = \"nano\"")
+	writeSettingsFile(t, "align_own_right = false")
 
 	settings, err := LoadSettings()
 	require.NoError(t, err)
 
-	// Заданный editor переопределяет дефолт; незаданные (в т.ч. будущие)
+	// Заданное поле переопределяет дефолт; незаданные (в т.ч. будущие)
 	// поля остаются на дефолтных значениях — структура ожидания строится от
 	// DefaultSettings, и при добавлении нового поля этот тест автоматически
 	// покрыл бы и его (аналогично partial override в keybindings_test.go).
 	want := DefaultSettings()
-	want.Editor = "nano"
+	want.AlignOwnRight = false
 	require.Equal(t, want, settings)
 }
 
@@ -66,7 +66,7 @@ func TestLoadSettingsInvalidTOMLReturnsError(t *testing.T) {
 	_, cleanup := setupSettingsTest(t)
 	defer cleanup()
 
-	writeSettingsFile(t, "editor = [\nnot valid toml")
+	writeSettingsFile(t, "align_own_right = [\nnot valid toml")
 
 	_, err := LoadSettings()
 	require.Error(t, err)

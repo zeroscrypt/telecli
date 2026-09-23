@@ -50,3 +50,98 @@ func ParseNewMessageUpdate(ctx context.Context, client TDClientInterface, update
 	}
 	return int64(cid), parseMessage(ctx, client, msgMap), true
 }
+
+// ParseChatReadInboxUpdate разбирает updateChatReadInbox — новое количество
+// непрочитанных В КОНКРЕТНОМ чате (растёт на новом сообщении, падает при
+// прочтении — оба случая один и тот же апдейт).
+func ParseChatReadInboxUpdate(update map[string]interface{}) (chatID int64, unreadCount int32, ok bool) {
+	if update["@type"] != "updateChatReadInbox" {
+		return 0, 0, false
+	}
+	id, idOk := update["chat_id"].(float64)
+	count, countOk := update["unread_count"].(float64)
+	if !idOk || !countOk {
+		return 0, 0, false
+	}
+	return int64(id), int32(count), true
+}
+
+// ParseUnreadMessageCountUpdate разбирает updateUnreadMessageCount —
+// агрегированное количество НЕПРОЧИТАННЫХ СООБЩЕНИЙ (не чатов!) по ЦЕЛОМУ
+// списку чатов. Берётся unread_count (ВКЛЮЧАЯ замьюченные чаты) — по живой
+// проверке человека: у "Все чаты" бейдж в самом Telegram именно такой,
+// сумма всех непрочитанных сообщений без фильтра по mute. ВАЖНО: этот
+// парсер используется ТОЛЬКО для folderID==0 (Main/"Все чаты") — для
+// остальных папок Telegram показывает ДРУГУЮ метрику (число ЧАТОВ с
+// непрочитанным, не сумму сообщений) из ДРУГОГО апдейта, см.
+// ParseUnreadChatCountUpdate; результат этого парсера для chatListFolder
+// парсится (для полноты и симметрии с остальным кодом), но вызывающая
+// сторона (internal/tui) обязана ИГНОРИРОВАТЬ его для folderID != 0, не
+// писать в folderUnread. folderID == 0 — синтетическая "Все чаты"/
+// chatListMain, тот же sentinel, что уже использует
+// internal/tui.Model.selectedFolderID для главного списка. Любой ChatList,
+// кроме chatListMain/chatListFolder (например, chatListArchive) —
+// ok == false, эта задача его не показывает.
+func ParseUnreadMessageCountUpdate(update map[string]interface{}) (folderID int32, unreadCount int32, ok bool) {
+	if update["@type"] != "updateUnreadMessageCount" {
+		return 0, 0, false
+	}
+	count, countOk := update["unread_count"].(float64)
+	if !countOk {
+		return 0, 0, false
+	}
+	chatList, listOk := update["chat_list"].(map[string]interface{})
+	if !listOk {
+		return 0, 0, false
+	}
+	switch chatList["@type"] {
+	case "chatListMain":
+		return 0, int32(count), true
+	case "chatListFolder":
+		id, idOk := chatList["chat_folder_id"].(float64)
+		if !idOk {
+			return 0, 0, false
+		}
+		return int32(id), int32(count), true
+	default:
+		return 0, 0, false
+	}
+}
+
+// ParseUnreadChatCountUpdate разбирает updateUnreadChatCount —
+// агрегированное количество ЧАТОВ (не сообщений!) с непрочитанным по
+// целому списку. Берётся unread_count (ВКЛЮЧАЯ замьюченные чаты) — по живой
+// проверке человека: папка с 12 замьюченными и 1 незамьюченным чатом с
+// непрочитанным показывает "13" в самом Telegram, mute не фильтруется.
+// ИСПОЛЬЗУЕТСЯ ТОЛЬКО для папок (folderID != 0) — для "Все чаты"
+// (folderID == 0) Telegram показывает другую метрику (сумму непрочитанных
+// СООБЩЕНИЙ, не число чатов), см. ParseUnreadMessageCountUpdate; результат
+// этого парсера для chatListMain парсится (для полноты), но вызывающая
+// сторона (internal/tui) обязана его игнорировать для folderID == 0.
+// Контракт тот же, что у остальных парсеров этого файла: не паникует на
+// битом входе, ok == false при несовпадении @type или отсутствии полей.
+func ParseUnreadChatCountUpdate(update map[string]interface{}) (folderID int32, chatCount int32, ok bool) {
+	if update["@type"] != "updateUnreadChatCount" {
+		return 0, 0, false
+	}
+	count, countOk := update["unread_count"].(float64)
+	if !countOk {
+		return 0, 0, false
+	}
+	chatList, listOk := update["chat_list"].(map[string]interface{})
+	if !listOk {
+		return 0, 0, false
+	}
+	switch chatList["@type"] {
+	case "chatListMain":
+		return 0, int32(count), true
+	case "chatListFolder":
+		id, idOk := chatList["chat_folder_id"].(float64)
+		if !idOk {
+			return 0, 0, false
+		}
+		return int32(id), int32(count), true
+	default:
+		return 0, 0, false
+	}
+}

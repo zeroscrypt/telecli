@@ -1,0 +1,151 @@
+# Сборка официальных релизных бинарников telecli (macOS arm64 + Linux amd64, статическая
+# линковка TDLib) и прикрепление их к GitHub Release.
+#
+# Файл готовится в ветке main/work-ветке по пути public-workflows/ (переносится в
+# public/.github/workflows/ оркестратором после ревью — та же практика, что с README).
+#
+# Триггер `on: release: types: [published]` срабатывает, потому что release-please
+# (googleapis/release-please-action@v4, настроен в public/.github/workflows/) публикует релиз
+# СРАЗУ published: в конфиге `public/release-please-config.json` отсутствует поле `draft`,
+# а поведение manifest-release по умолчанию — "даже если draft задан в конфиге, создаёт релиз
+# как уже опубликованный". Плюс `workflow_dispatch:` — ручной прогон для тестирования.
+
+name: release-binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Пин TDLib master на момент постановки задачи 0032 — детерминированный кэш сборки.
+  # Бампается одной строкой при обновлении TDLib.
+  TDLIB_COMMIT: ea97bcdd3a15523c58ddfe772b4547187cf5bbeb
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Основная, уже подтверждённая платформа (раннер macos-latest — нативный ARM64).
+          - os: macos-latest
+            asset_name: telecli-darwin-arm64
+            # Проверка статичности: строка с tdjson в выводе otool = провал шага.
+            check_cmd: otool -L
+            # Зависимости сборки TDLib — из README.md, раздел "Installation / Build TDLib".
+            deps_install: brew install cmake gperf openssl@3 zlib
+            # На macOS TDLib конфигурируется с явными путями к OpenSSL/zlib Homebrew
+            # (архитектура arm64 => prefix /opt/homebrew).
+            cmake_extras: -DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3 -DZLIB_ROOT=/opt/homebrew/opt/zlib
+          # Первая РЕАЛЬНАЯ проверка Linux-пути статической линковки из задачи 0030
+          # (проектировался только по аналогии с macOS).
+          - os: ubuntu-latest
+            asset_name: telecli-linux-amd64
+            check_cmd: ldd
+            deps_install: sudo apt-get update && sudo apt-get install -y git cmake g++ openssl libssl-dev zlib1g-dev gperf
+            cmake_extras: ""
+    env:
+      # Тег релиза, за который создан релиз. При ручном запуске (workflow_dispatch) пусто —
+      # сборка с default-ветки, без загрузки ассета в release.
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          # При триггере release чек-аутим сам тег релиза; при workflow_dispatch пустой
+          # ref означает default-ветку (actions/checkout при пустом ref берёт ref, вызвавший
+          # workflow: для dispatch это выбранная ветка, по умолчанию main).
+          ref: ${{ env.TAG }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Версия Go берётся из go.mod (go 1.25.1), не хардкодится здесь.
+          go-version-file: go.mod
+
+      - name: Cache built TDLib
+        id: cache-tdlib
+        uses: actions/cache@v6
+        with:
+          # Кэш привязан к пину TDLib И к ОС: .a-архивы непереносимы между платформами.
+          # path — выражение, а не литеральный `$HOME`: actions/cache не раскрывает
+          # переменные окружения в пути (см. README actions/cache, "Windows environment
+          # variables", но то же справедливо для `$HOME`: раскрывается только `~`).
+          key: tdlib-v1-${{ env.TDLIB_COMMIT }}-${{ matrix.os }}
+          path: ${{ runner.home }}/.local/tdlib
+
+      - name: Build and install TDLib (cache miss)
+        if: steps.cache-tdlib.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ matrix.deps_install }}
+          git clone https://github.com/tdlib/td.git "${{ runner.temp }}/td-src"
+          git -C "${{ runner.temp }}/td-src" checkout "${{ env.TDLIB_COMMIT }}"
+          cmake -S "${{ runner.temp }}/td-src" -B "${{ runner.temp }}/td-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/.local/tdlib" \
+            -DTD_INSTALL_SHARED_LIBRARIES=OFF \
+            ${{ matrix.cmake_extras }}
+          # Только статический таргет: динамический libtdjson в CI не нужен (экономия времени).
+          # TD_INSTALL_SHARED_LIBRARIES=OFF обязателен: иначе `cmake --install` упадёт на
+          # несуществующем shared-архиве (проверено эмпирически на минимальном CMake-проекте).
+
+          cmake --build "${{ runner.temp }}/td-build" --target tdjson_static -- -j"$(getconf _NPROCESSORS_ONLN)"
+          cmake --install "${{ runner.temp }}/td-build"
+
+      - name: Prepare static OpenSSL dir (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Изолированный каталог ТОЛЬКО с .a-архивами OpenSSL: если рядом лежит .dylib,
+          # ld64 на macOS предпочтёт динамическую версию (ловушка задачи 0030).
+          mkdir -p "${{ runner.temp }}/openssl-static"
+          cp "$(brew --prefix openssl@3)/lib/libssl.a" "${{ runner.temp }}/openssl-static/"
+          cp "$(brew --prefix openssl@3)/lib/libcrypto.a" "${{ runner.temp }}/openssl-static/"
+
+      - name: Build telecli (static)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CGO_CFLAGS="-I$HOME/.local/tdlib/include"
+          export CGO_LDFLAGS="-L$HOME/.local/tdlib/lib"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export CGO_LDFLAGS="$CGO_LDFLAGS -L${{ runner.temp }}/openssl-static"
+          fi
+          VERSION_FLAGS=""
+          if [ -n "$TAG" ]; then
+            VERSION_FLAGS="-X main.version=$TAG"
+          fi
+          go build -tags tdjson_static -ldflags "$VERSION_FLAGS" -o "${{ matrix.asset_name }}" ./cmd/telecli
+
+      - name: Verify no dynamic libtdjson in binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Страховка от "тихого прохода": если бинарник не собрался, otool/ldd
+          # вернут непустую ошибку, grep ничего не найдёт и шаг ложно пройдёт.
+          test -f "${{ matrix.asset_name }}"
+          # Строка tdjson в выводе otool/ldd = статическая линковка регрессировала.
+          if ${{ matrix.check_cmd }} "${{ matrix.asset_name }}" | grep -i tdjson; then
+            echo "::error::${{ matrix.check_cmd }} on ${{ matrix.asset_name }} contains a tdjson reference"
+            exit 1
+          fi
+          echo "OK: ${{ matrix.asset_name }} has no dynamic tdjson reference"
+
+      - name: Upload binary to the release
+        if: ${{ github.event_name == 'release' }}
+        env:
+          # gh на GitHub-hosted раннерах предустановлен; авторизация — встроенным токеном
+          # (permissions: contents: write выше), без доп. секретов.
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "$TAG" "${{ matrix.asset_name }}" --clobber

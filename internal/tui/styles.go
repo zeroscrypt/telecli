@@ -27,15 +27,25 @@ var (
 	pillTextColor      = lipgloss.Color("#12131A") // тёмный текст на цветных пилюлях
 )
 
-// panePaddingH — горизонтальный внутренний отступ панелей от рамки (по 1
-// колонке слева и справа), по правке человека "больше внутренний отступ от
-// границ". Вертикальный отступ намеренно НЕ добавлен — каждая строка
-// паддинга сверху/снизу напрямую отнимает строку видимого контента
-// (список папок/чатов короче на 1 позицию, ленты сообщений — на строку
-// меньше), а бюджет высоты и так расписан впритык (paneTitleHeight/
-// statusReserve/composeAreaHeight). Горизонтального места на 18-30-колоночных
-// панелях заметно больше, это дешевле.
-const panePaddingH = 1
+// insertModeColor — оранжево-жёлтый цвет метки "INP" (Insert-режим) в нижней
+// строке, по правке человека. Тот же оттенок, что chatSelectionColor —
+// намеренно отдельная константа (смысл разный: там подсветка курсора в
+// списке чатов, здесь — метка режима; менять один не должно менять другой).
+var insertModeColor = lipgloss.Color("#FFC857")
+
+// panePaddingH/panePaddingV — внутренний отступ панелей от рамки: по 1
+// колонке слева/справа, по panePaddingV строк СВЕРХУ И СНИЗУ (по правке
+// человека — пробовали 2 строки сверху+снизу, показалось примерно в 5 раз
+// заметнее ожидаемого; затем 1 строка сверху+снизу; затем только сверху;
+// финал — снова симметрично сверху и снизу, по 1 строке). КАЖДАЯ строка
+// паддинга напрямую отнимает строку видимого контента (список папок/чатов
+// короче, лента сообщений теснее) — учтено в internal/tui/model.go,
+// listContentRows() вычитает panePaddingV ДВАЖДЫ (верх+низ), не забудь
+// поправить там же, если это изменится снова.
+const (
+	panePaddingH = 1
+	panePaddingV = panePaddingH
+)
 
 // paneBorderStyle — общий стиль рамки панели: у активной панели — двойная
 // рамка (DoubleBorder) в полном акцентном цвете, у неактивной — одинарная
@@ -51,9 +61,9 @@ const panePaddingH = 1
 // эмпирически проверенная формула через GetHorizontalBorderSize().
 func paneBorderStyle(focused bool) lipgloss.Style {
 	if focused {
-		return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(activeBorderColor).Padding(0, panePaddingH)
+		return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(activeBorderColor).Padding(panePaddingV, panePaddingH)
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(inactiveBorderColor).Padding(0, panePaddingH)
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(inactiveBorderColor).Padding(panePaddingV, panePaddingH)
 }
 
 // ownColor/otherColor — мягкий неоновый бирюзовый для своих сообщений
@@ -118,4 +128,18 @@ func messageColor(isOutgoing bool) lipgloss.Color {
 		return ownColor
 	}
 	return otherColor
+}
+
+// composeCardBorderColor — белая рамка карточки черновика (Insert-режим),
+// по прямому запросу человека: черновик встроен в низ панели сообщений как
+// отдельная карточка, "по стилю как рамка сообщения" (тот же язык рамки,
+// что у renderMessageCard — RoundedBorder, без паддинга), но белым цветом —
+// чтобы визуально отличаться и от акцентной рамки панели, и от цветных
+// рамок карточек сообщений (те красятся по отправителю).
+var composeCardBorderColor = lipgloss.Color("#FFFFFF")
+
+// composeCardStyle — стиль рамки карточки черновика. Без паддинга — тот же
+// приём, что у renderMessageCard (только рамка + сам текст).
+func composeCardStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(composeCardBorderColor)
 }

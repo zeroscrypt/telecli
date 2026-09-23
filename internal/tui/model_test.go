@@ -45,7 +45,13 @@ type fakeClient struct {
 	sendCount int
 	messageCh chan map[string]interface{}
 	folderCh  chan map[string]interface{}
-	requests  []map[string]interface{}
+	// chatReadInboxCh/unreadCountCh/unreadChatCountCh — управляемые тестом
+	// каналы для ChatReadInboxUpdates()/UnreadCountUpdates()/
+	// UnreadChatCountUpdates(), по аналогии с folderCh.
+	chatReadInboxCh   chan map[string]interface{}
+	unreadCountCh     chan map[string]interface{}
+	unreadChatCountCh chan map[string]interface{}
+	requests          []map[string]interface{}
 }
 
 func (f *fakeClient) Send(_ context.Context, request map[string]interface{}) (map[string]interface{}, error) {
@@ -72,6 +78,18 @@ func (f *fakeClient) MessageUpdates() <-chan map[string]interface{} {
 func (f *fakeClient) SendStatusUpdates() <-chan map[string]interface{} { return nil }
 
 func (f *fakeClient) ChatFolderUpdates() <-chan map[string]interface{} { return f.folderCh }
+
+func (f *fakeClient) ChatReadInboxUpdates() <-chan map[string]interface{} {
+	return f.chatReadInboxCh
+}
+
+func (f *fakeClient) UnreadCountUpdates() <-chan map[string]interface{} {
+	return f.unreadCountCh
+}
+
+func (f *fakeClient) UnreadChatCountUpdates() <-chan map[string]interface{} {
+	return f.unreadChatCountCh
+}
 
 func (f *fakeClient) Close() {}
 
@@ -336,7 +354,7 @@ func TestViewRendersPanes(t *testing.T) {
 	}
 
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: "текст", Date: 100}}
-	view = renderMessages(m.messages, 0, false)
+	view, _ = renderMessages(m.messages, 0, false, 0)
 	if !strings.Contains(view, "текст") {
 		t.Errorf("renderMessages missing text:\n%s", view)
 	}
@@ -346,19 +364,23 @@ func TestRenderMessagesWrapsLongText(t *testing.T) {
 	longText := "одно два три четыре пять шесть семь восемь девять десять"
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 
-	got := renderMessages(msgs, 20, false)
+	got, _ := renderMessages(msgs, 20, false, 0)
 	lines := strings.Split(got, "\n")
 	// Карточка: верхняя рамка + N строк тела + нижняя рамка; длинный текст не
 	// умещается в одну строку на 20 колонок, значит N >= 2, итого строк >= 4.
 	if len(lines) < 4 {
 		t.Fatalf("expected wrapped body to span multiple card rows, got %d lines:\n%s", len(lines), got)
 	}
+	// Ширина строк <= 20 (не переполняет ленту), но НЕ обязательно ровно 20:
+	// по правке человека карточка теперь минимальной ширины по контенту
+	// (naturalCardWidth), не всегда растянута на всю ленту — здесь важно
+	// только, что перенос действительно произошёл и ничего не вылезло.
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		if w := lipgloss.Width(line); w != 20 {
-			t.Errorf("card line not exactly 20 cols wide: width=%d, line=%q", w, line)
+		if w := lipgloss.Width(line); w > 20 {
+			t.Errorf("card line wider than lane: width=%d, line=%q", w, line)
 		}
 	}
 }
@@ -368,7 +390,7 @@ func TestRenderMessagesZeroWidthDoesNotWrap(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 
 	for _, width := range []int{0, -1} {
-		got := renderMessages(msgs, width, false)
+		got, _ := renderMessages(msgs, width, false, 0)
 		// Перенос сохранён: строк такое же число, как и у текста без переноса.
 		if lines := strings.Split(got, "\n"); len(lines) != 2 {
 			t.Errorf("width=%d: expected single body line (no wrap), got %d lines:\n%s", width, len(lines), got)
@@ -386,7 +408,8 @@ func TestWindowSizeMsgRewrapsExistingMessages(t *testing.T) {
 	m.displayedChat = 111
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	m.viewport.SetContent(renderMessages(m.messages, contentWidth, false))
+	content, _ := renderMessages(m.messages, contentWidth, false, 0)
+	m.viewport.SetContent(content)
 
 	// Новый, более узкий размер терминала: лента перерисовывается под него.
 	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 40, Height: 30})
@@ -423,7 +446,7 @@ func TestNickIndexDistributesAcrossPalette(t *testing.T) {
 func TestRenderMessageCardTopLineContainsSenderName(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Ирина", Text: "привет", Date: 100}}
 
-	got := renderMessages(msgs, 20, false)
+	got, _ := renderMessages(msgs, 20, false, 0)
 	first := strings.Split(got, "\n")[0]
 	if !strings.Contains(first, "Ирина") {
 		t.Errorf("top card line must contain sender name, got: %q", first)
@@ -435,7 +458,7 @@ func TestRenderMessageCardTopLineContainsSenderName(t *testing.T) {
 func TestRenderMessagesAlignOwnRightPadsOwnCardToRightEdge(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: "моё", Date: 100, IsOutgoing: true}}
 
-	got := renderMessages(msgs, 60, true)
+	got, _ := renderMessages(msgs, 60, true, 0)
 	for _, line := range strings.Split(got, "\n") {
 		if line == "" {
 			continue
@@ -451,36 +474,46 @@ func TestRenderMessagesAlignOwnRightPadsOwnCardToRightEdge(t *testing.T) {
 
 // alignOwnRight=false (и для исходящего, и для входящего) — карточки на всю
 // ширину ленты без ведущих пробелов.
-func TestRenderMessagesAlignOwnRightFalseUsesFullWidthNoPadding(t *testing.T) {
+// TestRenderMessagesAlignOwnRightFalseNoRightPadding — alignOwnRight=false
+// (и для исходящего, и для входящего) — карточки без ведущих пробелов
+// (флеш-лефт, не прижаты к правому краю). Ширина карточки теперь
+// МИНИМАЛЬНАЯ по контенту (naturalCardWidth, по правке человека — раньше
+// растягивалась на всю ленту), а не всегда равна ленте — короткое "моё"
+// (3 буквы) должно дать карточку СУЩЕСТВЕННО у́же ленты (60), это и
+// проверяется явно, не только верхняя граница ширины.
+func TestRenderMessagesAlignOwnRightFalseNoRightPadding(t *testing.T) {
 	msgs := []auth.Message{
 		{ID: 1, SenderName: "Вы", Text: "моё", Date: 100, IsOutgoing: true},
 		{ID: 2, SenderName: "Ирина", Text: "чужое", Date: 101},
 	}
 
-	got := renderMessages(msgs, 60, false)
+	got, _ := renderMessages(msgs, 60, false, 0)
 	cards := strings.Split(got, "\n\n")
 	if len(cards) != 2 {
 		t.Fatalf("expected 2 cards, got %d:\n%s", len(cards), got)
 	}
 	for _, card := range cards {
 		firstLine := ""
+		maxLineW := 0
 		for _, line := range strings.Split(card, "\n") {
 			if line == "" {
 				continue
 			}
-			firstLine = line
-			break
+			if firstLine == "" {
+				firstLine = line
+			}
+			if w := lipgloss.Width(line); w > maxLineW {
+				maxLineW = w
+			}
+			if w := lipgloss.Width(line); w > 60 {
+				t.Errorf("card line wider than lane: width=%d, line=%q", w, line)
+			}
 		}
 		if strings.HasPrefix(firstLine, " ") {
-			t.Errorf("full-width card must not be padded, got leading space: %q", firstLine)
+			t.Errorf("card must be flush-left (no leading space), got: %q", firstLine)
 		}
-		for _, line := range strings.Split(card, "\n") {
-			if line == "" {
-				continue
-			}
-			if w := lipgloss.Width(line); w != 60 {
-				t.Errorf("full-width card line width %d != 60: %q", w, line)
-			}
+		if maxLineW >= 60 {
+			t.Errorf("short message card should be narrower than the lane (60), got width=%d", maxLineW)
 		}
 	}
 }
@@ -503,7 +536,7 @@ func TestRenderMessagesAlignOwnRightNarrowWidthDoesNotOverflow(t *testing.T) {
 	for _, sender := range []string{"Вы", "Александра"} {
 		msgs := []auth.Message{{ID: 1, SenderName: sender, Text: "моё сообщение подлиннее", Date: 100, IsOutgoing: true}}
 		for width := 3; width <= 30; width++ {
-			got := renderMessages(msgs, width, true)
+			got, _ := renderMessages(msgs, width, true, 0)
 			for _, line := range strings.Split(got, "\n") {
 				if line == "" {
 					continue
@@ -524,7 +557,7 @@ func TestRenderMessagesAlignOwnRightNarrowWidthDoesNotOverflow(t *testing.T) {
 // не гарантирует соблюдение инварианта ширины (осознанный, а не забытый предел).
 func TestRenderMessageCardNarrowWidthLineWidthsMatch(t *testing.T) {
 	for _, width := range []int{3, 4, 5, 6, 8} {
-		got := renderMessageCard(auth.Message{ID: 1, SenderName: "?", Text: "x", Date: 100}, width, false)
+		got := renderMessageCard(auth.Message{ID: 1, SenderName: "?", Text: "x", Date: 100}, width, false, false)
 		for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
 			if line == "" {
 				continue
@@ -918,7 +951,12 @@ func TestSendMessageFailureKeepsDraftAndReturnsError(t *testing.T) {
 	}
 }
 
-func TestInsertEnterEmptyDraftReturnsToNormalWithoutSending(t *testing.T) {
+// TestInsertEnterEmptyDraftStaysInInsertWithoutSending — Enter на пустом (или
+// только из пробелов) черновике остаётся в Insert-режиме и не отправляет:
+// Enter зарезервирован под отправку и не закрывает режим сам по себе
+// (закрывает только Esc). Раньше эта ветка ошибочно выкидывала в Normal с
+// Blur() фокуса.
+func TestInsertEnterEmptyDraftStaysInInsertWithoutSending(t *testing.T) {
 	for _, draft := range []string{"", "   "} {
 		fake := &fakeClient{}
 		m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
@@ -931,8 +969,11 @@ func TestInsertEnterEmptyDraftReturnsToNormalWithoutSending(t *testing.T) {
 		if cmd != nil {
 			t.Fatalf("draft %q: expected nil cmd on empty draft enter, got %v", draft, cmd)
 		}
-		if m.mode != modeNormal {
-			t.Fatalf("draft %q: expected modeNormal, got %v", draft, m.mode)
+		if m.mode != modeInsert {
+			t.Fatalf("draft %q: expected modeInsert, got %v", draft, m.mode)
+		}
+		if !m.composeInput.Focused() {
+			t.Fatalf("draft %q: composeInput must stay focused", draft)
 		}
 		if m.sendingMsg {
 			t.Fatalf("draft %q: sendingMsg must not be set", draft)
@@ -961,56 +1002,6 @@ func TestEnterInsertWithoutSelectedChatShowsStatusAndStaysNormal(t *testing.T) {
 	}
 	if m.composeInput.Value() != "" {
 		t.Fatalf("expected composeInput empty (never entered insert), got %q", m.composeInput.Value())
-	}
-}
-
-func TestWriteAndReadDraftTempFile(t *testing.T) {
-	for _, want := range []string{"привет мир", "строка1\nстрока2"} {
-		path, err := writeDraftTempFile(want)
-		if err != nil {
-			t.Fatalf("writeDraftTempFile(%q) failed: %v", want, err)
-		}
-		got, err := readDraftTempFile(path)
-		if err != nil {
-			t.Fatalf("readDraftTempFile(%q) failed: %v", path, err)
-		}
-		if got != want {
-			t.Errorf("round-trip mismatch: want %q, got %q", want, got)
-		}
-		os.Remove(path)
-	}
-
-	// Редакторы добавляют при сохранении финальный перевод строки — он не
-	// считается частью текста и должен обрезаться.
-	path, err := writeDraftTempFile("текст\n\n")
-	if err != nil {
-		t.Fatalf("writeDraftTempFile failed: %v", err)
-	}
-	defer os.Remove(path)
-	got, err := readDraftTempFile(path)
-	if err != nil {
-		t.Fatalf("readDraftTempFile failed: %v", err)
-	}
-	if got != "текст" {
-		t.Errorf("expected trailing newlines trimmed, got %q", got)
-	}
-}
-
-func TestOpenEditorKeyReturnsCmd(t *testing.T) {
-	m := testModel(t, nil)
-	m.displayedChat = 111
-	m, _ = updateModel(m, keyRune('i'))
-	m = typeText(m, "черновик")
-
-	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyCtrlE})
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd for open_editor key")
-	}
-	if m.mode != modeInsert {
-		t.Fatalf("expected modeInsert after open editor, got %v", m.mode)
-	}
-	if m.composeInput.Value() != "черновик" {
-		t.Fatalf("expected draft preserved after open editor, got %q", m.composeInput.Value())
 	}
 }
 
@@ -1059,8 +1050,14 @@ func TestCtrlCQuitsFromEveryMode(t *testing.T) {
 
 func TestViewShowsModeIndicator(t *testing.T) {
 	m := testModel(t, nil)
-	if !strings.Contains(m.View(), "NORMAL") {
-		t.Errorf("normal mode indicator missing:\n%s", m.View())
+	// "ELECLi" (строчная "i" в конце — фирменное написание "TELECLi"), не
+	// "TELECLi" целиком — см. комментарий в TestBottomLineNormalModeShowsPill
+	// (буква "T" стилизована отдельно, ANSI-сброс между "T" и "ELECLi").
+	if !strings.Contains(m.View(), "ELECLi") {
+		t.Errorf("logo missing:\n%s", m.View())
+	}
+	if !strings.Contains(m.View(), "NAV") {
+		t.Errorf("normal mode indicator (NAV) missing:\n%s", m.View())
 	}
 	if strings.Contains(m.View(), "-- NORMAL --") {
 		t.Errorf("legacy '-- NORMAL --' indicator must be gone:\n%s", m.View())
@@ -1068,7 +1065,7 @@ func TestViewShowsModeIndicator(t *testing.T) {
 
 	m.displayedChat = 111
 	m, _ = updateModel(m, keyRune('i'))
-	if !strings.Contains(m.View(), "редактор") {
+	if !strings.Contains(m.View(), "отправить") {
 		t.Errorf("insert mode draft hint missing:\n%s", m.View())
 	}
 
@@ -1248,16 +1245,64 @@ func TestFocusPaneHotkeysJumpDirectly(t *testing.T) {
 	}
 }
 
-// Статус-строка Normal-режима без статуса — синяя пилюля "NORMAL" + тусклая
-// подсказка (вместо прежнего "-- NORMAL --").
+// Статус-строка Normal-режима без статуса — логотип "TELECLi" + синяя метка
+// "NAV" + тусклая подсказка (вместо прежнего "-- NORMAL --"/"NORMAL"-пилюли).
 func TestBottomLineNormalModeShowsPill(t *testing.T) {
 	m := testModel(t, nil) // status == ""
 	got := m.bottomLine()
-	if !strings.Contains(got, "NORMAL") {
-		t.Errorf("normal mode bottom line must contain the NORMAL pill, got: %q", got)
+	// "ELECLi", не "TELECLi" целиком: буква "T" в лого стилизована отдельно
+	// (свой Render-вызов, см. telecliLogo) — между "T" и "ELECLi" в
+	// отрендеренной строке есть ANSI-сброс стиля, "TELECLi" слитной
+	// подстрокой там больше нет, хотя визуально буквы стоят подряд.
+	if !strings.Contains(got, "ELECLi") {
+		t.Errorf("normal mode bottom line must contain the TELECLi logo, got: %q", got)
+	}
+	if !strings.Contains(got, "NAV") {
+		t.Errorf("normal mode bottom line must contain the NAV tag, got: %q", got)
 	}
 	if !strings.Contains(got, "←/→") {
 		t.Errorf("normal mode bottom line must contain the hint with '←/→', got: %q", got)
+	}
+}
+
+// TestBottomLineNormalHintIsContextual — подсказка Normal-режима собирается
+// условно по фокусу: сначала общие хоткеи (tab/←/→/j/k/i/:/t/q), затем
+// контекстные для панели в фокусе. Клавиша "/" сама по себе не различитель —
+// она входит в состав "←/→" и есть во всех трёх вариантах, поэтому
+// «отсутствие» проверяем только по описаниям и по уникальной подстроке
+// "ctrl+f".
+func TestBottomLineNormalHintIsContextual(t *testing.T) {
+	common := []string{"tab", "t", "q", "панели", "фокус", "курсор", "ввод", "команда", "справка", "выход"}
+	search := []string{"поиск"}       // ключ "/" есть везде из-за "←/→", различаем по описанию
+	delete := []string{"удалить чат"} // ключ "d" проверяем отдельно ниже (mandatory, chats)
+	file := []string{"ctrl+f", "файл"}
+
+	for _, tc := range []struct {
+		name       string
+		focus      focus
+		mandatory  []string
+		prohibited []string
+	}{
+		// В chats дополнительно проверяем наличие самих ключей "/" и "d" —
+		// «отсутствие» по ним не проверяем (см. комментарии выше).
+		{"folders", focusFolders, common, []string{"поиск", "удалить чат", "d", "ctrl+f", "файл"}},
+		{"chats", focusChats, append(append(append(append([]string{}, common...), search...), delete...), "/", "d"), file},
+		{"messages", focusMessages, append(append([]string{}, common...), file...), []string{"поиск", "удалить чат"}},
+	} {
+		m := testModel(t, nil)
+		m.version = ""
+		m.focus = tc.focus
+		got := m.bottomLine()
+		for _, s := range tc.mandatory {
+			if !strings.Contains(got, s) {
+				t.Errorf("%s: expected %q in bottom line, got: %q", tc.name, s, got)
+			}
+		}
+		for _, s := range tc.prohibited {
+			if strings.Contains(got, s) {
+				t.Errorf("%s: did not expect %q in bottom line, got: %q", tc.name, s, got)
+			}
+		}
 	}
 }
 
@@ -1327,6 +1372,57 @@ func TestWaitForMessageUpdateAppendsToCurrentChat(t *testing.T) {
 	}
 	if m.messages[0].Text != "новое" {
 		t.Errorf("unexpected appended message: %+v", m.messages[0])
+	}
+}
+
+// TestWaitForMessageUpdateDoesNotJumpToBottomWhileScrolledUp — правка по
+// замечанию человека: лента "сама возвращалась вниз", даже пока читаешь
+// историю, потому что newMessageUpdateMsg безусловно звал GotoBottom().
+// Если человек прокрутил вверх (не AtBottom()) — входящее сообщение не
+// должно двигать прокрутку.
+func TestWaitForMessageUpdateDoesNotJumpToBottomWhileScrolledUp(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 10})
+	m.displayedChat = 111
+
+	longText := strings.Repeat("длинная строка чтобы контент был выше высоты вьюпорта ", 10)
+	m.messages = []auth.Message{
+		{ID: 1, Text: longText, SenderName: "Вы", Date: 100},
+		{ID: 2, Text: longText, SenderName: "Собеседник", Date: 101},
+	}
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0)
+	m.viewport.SetContent(content)
+	m.viewport.SetYOffset(0) // прокрутили наверх, читаем историю
+	if m.viewport.AtBottom() {
+		t.Fatal("test setup invalid: expected viewport not at bottom before the update")
+	}
+
+	m, _ = updateModel(m, newMessageUpdateMsg{chatID: 111, message: auth.Message{ID: 3, Text: "новое", SenderName: "Собеседник", Date: 102}})
+
+	if m.viewport.YOffset != 0 {
+		t.Errorf("expected YOffset unchanged (0) while scrolled up, got %d", m.viewport.YOffset)
+	}
+}
+
+// TestWaitForMessageUpdateStillJumpsToBottomWhenAlreadyThere — симметричный
+// случай: если человек и так был внизу (следит за перепиской вживую), новое
+// сообщение по-прежнему должно показываться сразу — поведение до этой правки
+// сохраняется для этого случая.
+func TestWaitForMessageUpdateStillJumpsToBottomWhenAlreadyThere(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.displayedChat = 111
+	m.messages = []auth.Message{{ID: 1, Text: "первое", SenderName: "Вы", Date: 100}}
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0)
+	m.viewport.SetContent(content)
+	m.viewport.GotoBottom()
+
+	m, _ = updateModel(m, newMessageUpdateMsg{chatID: 111, message: auth.Message{ID: 2, Text: "новое", SenderName: "Собеседник", Date: 101}})
+
+	if !m.viewport.AtBottom() {
+		t.Errorf("expected viewport to stay at bottom after update when already there")
 	}
 }
 
@@ -1748,15 +1844,24 @@ func TestEnterSendsMultilineMessage(t *testing.T) {
 
 // TestApplyLayoutShrinksBodyInInsertMode — вход в Insert-режим уменьшает высоту
 // viewport ровно на разницу бюджетов (composeAreaHeight+1 вместо statusReserve).
+// По правке человека — черновик больше не резервирует отдельную область
+// ПОД всеми тремя панелями (bottomReserve/statusReserve не меняется по
+// режиму вовсе), а встроен КАРТОЧКОЙ внутрь самой панели сообщений: её
+// вьюпорт сжимается ровно на composeCardHeight() (рамка+высота черновика).
 func TestApplyLayoutShrinksBodyInInsertMode(t *testing.T) {
 	m := testModel(t, nil)
 	normalHeight := m.viewport.Height
 
 	m.displayedChat = 111
 	m, _ = updateModel(m, keyRune('i'))
-	want := normalHeight - (composeAreaHeight + 1 - statusReserve)
+	want := normalHeight - m.composeCardHeight()
 	if m.viewport.Height != want {
 		t.Fatalf("expected viewport.Height %d in insert mode, got %d", want, m.viewport.Height)
+	}
+	// paneRowHeight (общий бюджет для всех панелей) НЕ должен меняться —
+	// в отличие от m.viewport.Height, папки/чаты не сжимаются.
+	if m.paneRowHeight != normalHeight {
+		t.Fatalf("expected paneRowHeight unchanged (%d), got %d", normalHeight, m.paneRowHeight)
 	}
 }
 
@@ -1996,10 +2101,11 @@ func TestChatFoldersUpdateMsgClosedStopsResubscribing(t *testing.T) {
 // список чатов + лента) и строка заголовков НАД ними не должны превышать
 // ширину терминала — иначе строка переносится и раскладка едет.
 // Задача 0020 добавила обычной строке Normal-режима фиксированную подсказку
-// (пилюля "NORMAL" + текст подсказки, ~85 колонок) — на узких терминалах она
-// по замыслу шире экрана и переносится терминалом (это не класс бага раскладки,
-// который ловит этот тест), поэтому строгая проверка ширины применяется к
-// заголовкам и панелям, а нижняя строка проверяется только на наличие пилюли.
+// (логотип+метка режима + текст подсказки, ~85 колонок) — на узких терминалах
+// она по замыслу шире экрана и переносится терминалом (это не класс бага
+// раскладки, который ловит этот тест), поэтому строгая проверка ширины
+// применяется к заголовкам и панелям, а нижняя строка — только на наличие
+// метки режима.
 func TestViewTotalWidthFitsTerminal(t *testing.T) {
 	m := testModel(t, []auth.Chat{{ID: 1, Title: "A"}})
 	m.folders = []auth.Folder{{ID: 7, Name: "Работа"}}
@@ -2025,8 +2131,8 @@ func TestViewTotalWidthFitsTerminal(t *testing.T) {
 		// длинная фиксированная подсказка, на узких терминалах переносится
 		// терминалом по замыслу — проверяем только её наличие с пилюлей.
 		bottom := lines[len(lines)-1]
-		if !strings.Contains(bottom, "NORMAL") {
-			t.Errorf("width %d: bottom line missing NORMAL pill: %q", width, bottom)
+		if !strings.Contains(bottom, "NAV") {
+			t.Errorf("width %d: bottom line missing NAV tag: %q", width, bottom)
 		}
 	}
 }
@@ -2036,16 +2142,22 @@ func TestViewTotalWidthFitsTerminal(t *testing.T) {
 // область в Insert-режиме занимает ровно composeAreaHeight+1 строк — независимо
 // от числа строк и длины черновика (высота поля фиксирована, длинный черновик
 // прокручивается внутренним viewport, а не растягивает бюджет).
-func TestBottomLineInsertHeightMatchesBudget(t *testing.T) {
+// TestBottomLineInsertAlwaysOneLine — по правке человека черновик переехал
+// в msgPane() отдельной карточкой; bottomLine() в Insert-режиме теперь
+// ВСЕГДА ровно 1 строка (логотип+метка+подсказка), независимо от длины
+// черновика — в отличие от старого поведения, где сам черновик рисовался
+// прямо в bottomLine() и её высота росла вместе с ним.
+func TestBottomLineInsertAlwaysOneLine(t *testing.T) {
 	m := testModel(t, nil)
 	m.displayedChat = 111
 	m, _ = updateModel(m, keyRune('i'))
 
 	for _, draft := range []string{"", "одна строка", "первая\nвторая\nтретья\nчетвёртая\nпятая", strings.Repeat("длинный ", 50)} {
 		m.composeInput.SetValue(draft)
+		m.syncComposeHeight()
 		got := m.bottomLine()
-		if lines := strings.Split(got, "\n"); len(lines) != composeAreaHeight+1 {
-			t.Fatalf("draft %q: expected %d rows in insert bottom line, got %d:\n%q", draft, composeAreaHeight+1, len(lines), got)
+		if lines := strings.Split(got, "\n"); len(lines) != 1 {
+			t.Fatalf("draft %q: expected exactly 1 row in insert bottom line, got %d:\n%q", draft, len(lines), got)
 		}
 	}
 }
@@ -2155,35 +2267,34 @@ func TestPaneTitleWidthMatchesPaneWidth(t *testing.T) {
 
 // TestBottomLineShowsVersionRightAligned — в Normal-режиме без статуса версия
 // прижимается к правому краю нижней строки: текст версии физически правее
-// пилюли NORMAL (а не вписана в подсказку).
+// метки NAV (а не вписана в подсказку).
 func TestBottomLineShowsVersionRightAligned(t *testing.T) {
 	m := testModel(t, nil)
 	m.version = "v1.2.3"
-	m.width = 100
+	m.width = 140
 
 	got := m.bottomLine()
 	if !strings.Contains(got, "v1.2.3") {
 		t.Fatalf("bottom line must contain the version, got: %q", got)
 	}
-	if !strings.Contains(got, "NORMAL") {
-		t.Fatalf("bottom line must contain the NORMAL pill, got: %q", got)
+	if !strings.Contains(got, "NAV") {
+		t.Fatalf("bottom line must contain the NAV tag, got: %q", got)
 	}
-	if strings.Index(got, "v1.2.3") <= strings.Index(got, "NORMAL") {
-		t.Fatalf("version must be physically to the right of the NORMAL pill, got: %q", got)
+	if strings.Index(got, "v1.2.3") <= strings.Index(got, "NAV") {
+		t.Fatalf("version must be physically to the right of the NAV tag, got: %q", got)
 	}
 }
 
 // TestBottomLineShowsUpdateAvailable — при найденном обновлении правая часть
-// нижней строки показывает "текущая → новая (:update)". Ширина 120, а не 100
-// (как в файле задачи): измерено, что левая часть (пилюля NORMAL + подсказка)
-// занимает 85 колонок, а вся правая часть "v1.2.3 → v1.3.0 (:update)" — ещё 25
-// (итого 110) — на 100 версия по замыслу bottomLine (pad < 1) опускается целиком,
-// и тест проверял бы противоречащий себе случай.
+// нижней строки показывает "текущая → новая (:update)". Ширина 140 (измерено
+// эмпирически после добавления пары "j/k/↑↓ — курсор" в подсказку — при
+// меньшей ширине версия по замыслу bottomLine (pad < 1) опускается целиком,
+// и тест проверял бы противоречащий себе случай).
 func TestBottomLineShowsUpdateAvailable(t *testing.T) {
 	m := testModel(t, nil)
 	m.version = "v1.2.3"
 	m.updateAvailable = "v1.3.0"
-	m.width = 120
+	m.width = 140
 
 	got := m.bottomLine()
 	if !strings.Contains(got, "v1.2.3 → v1.3.0") {
@@ -2282,5 +2393,1216 @@ func TestUpdateCheckMsgOlderDoesNotSetUpdateAvailable(t *testing.T) {
 	m, _ = updateModel(m, updateCheckMsg{release: update.Release{TagName: "v0.1.0"}, explicit: false})
 	if m.updateAvailable != "" {
 		t.Fatalf("expected updateAvailable empty for older release, got %q", m.updateAvailable)
+	}
+}
+
+// --- 0027: поиск чатов/каналов/контактов ---
+
+// tuiSearchChatsResponse строит {"@type":"chats","chat_ids":[...]} — форма
+// ответа searchChatsOnServer/searchPublicChats.
+func tuiSearchChatsResponse(ids ...int64) map[string]interface{} {
+	list := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, float64(id))
+	}
+	return map[string]interface{}{"@type": "chats", "chat_ids": list}
+}
+
+// tuiGetChatResponse — ответ getChat с заголовком.
+func tuiGetChatResponse(chatID int64, title string) map[string]interface{} {
+	return map[string]interface{}{"@type": "chat", "id": float64(chatID), "title": title}
+}
+
+// tuiSearchContactsResponse — ответ searchContacts (users + user_ids).
+func tuiSearchContactsResponse(ids ...int64) map[string]interface{} {
+	list := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, float64(id))
+	}
+	return map[string]interface{}{"@type": "users", "user_ids": list}
+}
+
+// tuiGetUserResponse — ответ getUser с именем.
+func tuiGetUserResponse(userID int64, first, last string) map[string]interface{} {
+	return map[string]interface{}{"@type": "user", "id": float64(userID), "first_name": first, "last_name": last}
+}
+
+// TestSearchHotkeyEntersSearchMode — "/" в Normal-режиме переводит в modeSearch
+// и фокусирует поле поиска. Гейта на выбранный чат НЕТ (в отличие от i/ctrl+f):
+// поиск не требует открытого чата.
+func TestSearchHotkeyEntersSearchMode(t *testing.T) {
+	m := testModel(t, nil)
+
+	m, cmd := updateModel(m, keyRune('/'))
+	if cmd == nil {
+		t.Fatal("expected non-nil focus cmd after /")
+	}
+	if m.mode != modeSearch {
+		t.Fatalf("expected modeSearch after /, got %v", m.mode)
+	}
+	if !m.searchInput.Focused() {
+		t.Fatal("expected searchInput focused in search mode")
+	}
+}
+
+// TestSearchEscReturnsToNormal — Esc в modeSearch возвращает modeNormal и
+// сбрасывает активные результаты поиска.
+func TestSearchEscReturnsToNormal(t *testing.T) {
+	m := testModel(t, nil)
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{Chats: []auth.SearchResultChat{{ID: 1, Title: "X"}}}
+
+	m, _ = updateModel(m, keyRune('/'))
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on esc in search mode, got %v", cmd)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after esc, got %v", m.mode)
+	}
+	if m.searchInput.Focused() {
+		t.Fatal("expected searchInput blurred after esc")
+	}
+	if m.searchActive {
+		t.Fatal("expected searchActive cleared after esc")
+	}
+}
+
+// TestSearchEmptyEnterReturnsToNormalWithoutSearching — Enter с пустым (или из
+// одних пробелов) запросом возвращает modeNormal без запуска поиска.
+func TestSearchEmptyEnterReturnsToNormalWithoutSearching(t *testing.T) {
+	for _, q := range []string{"", "   "} {
+		fake := &fakeClient{}
+		m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+		m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+		m, _ = updateModel(m, keyRune('/'))
+		m = typeText(m, q)
+
+		m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd != nil {
+			t.Fatalf("query %q: expected nil cmd on empty enter, got %v", q, cmd)
+		}
+		if m.mode != modeNormal {
+			t.Fatalf("query %q: expected modeNormal, got %v", q, m.mode)
+		}
+		if m.searchingNow {
+			t.Fatalf("query %q: searchingNow must not be set", q)
+		}
+		if fake.sendCount != 0 {
+			t.Fatalf("query %q: expected no sends, got %d", q, fake.sendCount)
+		}
+	}
+}
+
+// TestSearchEnterRunsSearchAndAppliesResults — Enter с непустым запросом
+// запускает SearchAll (searchingNow + статус "Поиск…", режим заморожен), а
+// успешный результат переводит searchActive=true, фокус в список чатов,
+// modeNormal; результаты видны в chatPane (заголовки чатов + "👤 " перед
+// контактами).
+func TestSearchEnterRunsSearchAndAppliesResults(t *testing.T) {
+	fake := &fakeClient{responses: []map[string]interface{}{
+		tuiSearchChatsResponse(1),
+		tuiGetChatResponse(1, "Известный чат"),
+		tuiSearchChatsResponse(2),
+		tuiGetChatResponse(2, "Публичный канал"),
+		tuiSearchContactsResponse(100),
+		tuiGetUserResponse(100, "Иван", "Петров"),
+	}}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = updateModel(m, keyRune('/'))
+	m = typeText(m, "запрос")
+
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected non-nil search cmd after enter")
+	}
+	if !m.searchingNow {
+		t.Fatal("expected searchingNow after enter")
+	}
+	if m.status != "Поиск…" {
+		t.Fatalf("expected status 'Поиск…', got %q", m.status)
+	}
+	if m.mode != modeSearch {
+		t.Fatalf("expected modeSearch while searching, got %v", m.mode)
+	}
+
+	m, _ = updateModel(m, cmd())
+	if m.searchingNow {
+		t.Fatal("expected searchingNow cleared after searchResultMsg")
+	}
+	if !m.searchActive {
+		t.Fatal("expected searchActive after successful search")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after search, got %v", m.mode)
+	}
+	if m.focus != focusChats {
+		t.Fatalf("expected focusChats after search, got %v", m.focus)
+	}
+	if m.searchInput.Focused() {
+		t.Fatal("expected searchInput blurred after search result")
+	}
+
+	pane := m.chatPane()
+	for _, want := range []string{"Известный чат", "Публичный канал", "👤 Иван Петров"} {
+		if !strings.Contains(pane, want) {
+			t.Errorf("chatPane missing %q:\n%s", want, pane)
+		}
+	}
+}
+
+// TestSearchResultMsgErrorShowsStatusAndReturnsToNormal — ошибка поиска
+// показывает статус и возвращает modeNormal без результатов.
+func TestSearchResultMsgErrorShowsStatusAndReturnsToNormal(t *testing.T) {
+	m := testModel(t, nil)
+	m, _ = updateModel(m, keyRune('/'))
+	m.searchingNow = true
+
+	m, cmd := updateModel(m, searchResultMsg{err: errors.New("boom")})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on search error, got %v", cmd)
+	}
+	if m.searchingNow {
+		t.Fatal("expected searchingNow cleared")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after search error, got %v", m.mode)
+	}
+	if m.searchActive {
+		t.Fatal("expected searchActive false after search error")
+	}
+	if !strings.Contains(m.status, "Поиск не удался") {
+		t.Fatalf("expected error status, got %q", m.status)
+	}
+}
+
+// TestSearchResultsNavigationClamps — ↑/↓ внутри объединённого списка
+// (чаты+контакты) не выходят за его границы.
+func TestSearchResultsNavigationClamps(t *testing.T) {
+	m := testModel(t, nil)
+	m.focus = focusChats
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{
+		Chats:    []auth.SearchResultChat{{ID: 1, Title: "Ч1"}, {ID: 2, Title: "Ч2"}},
+		Contacts: []auth.SearchResultContact{{UserID: 100, Name: "Контакт"}},
+	}
+	m.searchCursor = 0
+
+	for i := 0; i < 10; i++ {
+		m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.searchCursor != 2 {
+		t.Fatalf("expected searchCursor clamped to 2, got %d", m.searchCursor)
+	}
+	for i := 0; i < 10; i++ {
+		m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyUp})
+	}
+	if m.searchCursor != 0 {
+		t.Fatalf("expected searchCursor clamped to 0, got %d", m.searchCursor)
+	}
+}
+
+// TestSearchBackKeyExitsResultsToNormalChatList — Esc (Back) при активных
+// результатах в focusChats сбрасывает результаты и возвращает обычный список
+// чатов, курсор обычного списка не трогает.
+func TestSearchBackKeyExitsResultsToNormalChatList(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 5, Title: "Обычный"}})
+	m.focus = focusChats
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{Chats: []auth.SearchResultChat{{ID: 1, Title: "Найденный"}}}
+	m.searchCursor = 1
+
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on esc in search results, got %v", cmd)
+	}
+	if m.searchActive {
+		t.Fatal("expected searchActive cleared")
+	}
+	if len(m.searchResults.Chats) != 0 {
+		t.Fatalf("expected searchResults cleared, got %+v", m.searchResults)
+	}
+	if m.searchCursor != 0 {
+		t.Fatalf("expected searchCursor reset to 0, got %d", m.searchCursor)
+	}
+	if m.focus != focusChats {
+		t.Fatalf("expected focusChats unchanged, got %v", m.focus)
+	}
+}
+
+// TestSearchSelectChatFromResults — выбор чата из результатов ведёт себя как
+// обычный selectChatCmd (openChat раньше getChatHistory), при переключении с
+// уже открытого чата закрывает прежний, displayedChat сбрасывается на новый.
+func TestSearchSelectChatFromResults(t *testing.T) {
+	fake := &fakeClient{}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.focus = focusChats
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{Chats: []auth.SearchResultChat{{ID: 111, Title: "Найденный"}}}
+	m.displayedChat = 222 // уже открыт другой чат — должен закрыться
+	m.searchCursor = 0
+
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd after selecting search chat")
+	}
+	if m.searchActive {
+		t.Fatal("expected searchActive cleared after selecting chat")
+	}
+	if m.displayedChat != 111 {
+		t.Fatalf("expected displayedChat 111, got %d", m.displayedChat)
+	}
+	if !m.loadingMsgs {
+		t.Fatal("expected loadingMsgs after selecting chat")
+	}
+	if m.focus != focusMessages {
+		t.Fatalf("expected focusMessages, got %v", m.focus)
+	}
+	runCmd(t, cmd)
+
+	var sawOpen, sawHistory, sawClose bool
+	for _, r := range fake.requests {
+		if r["@type"] == "openChat" && r["chat_id"] == int64(111) {
+			sawOpen = true
+		}
+		if r["@type"] == "getChatHistory" && r["chat_id"] == int64(111) {
+			sawHistory = true
+		}
+		if r["@type"] == "closeChat" && r["chat_id"] == int64(222) {
+			sawClose = true
+		}
+	}
+	if !sawOpen {
+		t.Errorf("expected openChat(111), requests: %v", fake.requests)
+	}
+	if !sawHistory {
+		t.Errorf("expected getChatHistory(111), requests: %v", fake.requests)
+	}
+	if !sawClose {
+		t.Errorf("expected closeChat(222), requests: %v", fake.requests)
+	}
+}
+
+// TestSearchSelectContactOpensPrivateChat — выбор контакта из результатов
+// шлёт createPrivateChat(user_id, force=true), затем openChat и getChatHistory
+// за чат, id которого пришёл в ответе createPrivateChat.
+func TestSearchSelectContactOpensPrivateChat(t *testing.T) {
+	fake := &fakeClient{responses: []map[string]interface{}{
+		{"@type": "chat", "id": float64(500)},
+	}}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.focus = focusChats
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{
+		Contacts: []auth.SearchResultContact{{UserID: 100, Name: "Иван Петров"}},
+	}
+	m.searchCursor = 0 // единственный элемент — контакт (чатов нет)
+
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd after selecting contact")
+	}
+	if m.searchActive {
+		t.Fatal("expected searchActive cleared after selecting contact")
+	}
+	if !m.loadingMsgs {
+		t.Fatal("expected loadingMsgs after selecting contact")
+	}
+	if m.focus != focusMessages {
+		t.Fatalf("expected focusMessages, got %v", m.focus)
+	}
+	runCmd(t, cmd)
+
+	var sawCreate, sawOpen, sawHistory bool
+	for _, r := range fake.requests {
+		if r["@type"] == "createPrivateChat" && r["user_id"] == int64(100) && r["force"] == true {
+			sawCreate = true
+		}
+		if r["@type"] == "openChat" && r["chat_id"] == int64(500) {
+			sawOpen = true
+		}
+		if r["@type"] == "getChatHistory" && r["chat_id"] == int64(500) {
+			sawHistory = true
+		}
+	}
+	if !sawCreate {
+		t.Errorf("expected createPrivateChat(user_id=100, force=true), requests: %v", fake.requests)
+	}
+	if !sawOpen {
+		t.Errorf("expected openChat(500), requests: %v", fake.requests)
+	}
+	if !sawHistory {
+		t.Errorf("expected getChatHistory(500), requests: %v", fake.requests)
+	}
+}
+
+// TestSearchChatPaneEmptyShowsPlaceholder — при активном поиске с пустыми
+// результатами chatPane показывает "Ничего не найдено", а не обычный список.
+func TestSearchChatPaneEmptyShowsPlaceholder(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "Обычный"}})
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{}
+
+	pane := m.chatPane()
+	if !strings.Contains(pane, "Ничего не найдено") {
+		t.Errorf("expected 'Ничего не найдено' placeholder, pane:\n%s", pane)
+	}
+	if strings.Contains(pane, "Обычный") {
+		t.Errorf("normal chats must not be shown while searchActive, pane:\n%s", pane)
+	}
+}
+
+// TestMessageCursorMovesWithUpDown — ↑/↓ в focusMessages двигают messageCursor
+// по ОТДЕЛЬНЫМ сообщениям (не по строкам, как раньше): старт с последнего
+// индекса (см. п.5 — после загрузки курсор на последнем сообщении), ↑
+// уменьшает на 1, ↓ увеличивает; на границах (0 и len-1) курсор не выходит за
+// пределы (по образцу TestFolderNavigationClamps).
+func TestMessageCursorMovesWithUpDown(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m.focus = focusMessages
+	m.messages = []auth.Message{
+		{ID: 1, SenderName: "А", Text: "один", Date: 100},
+		{ID: 2, SenderName: "Б", Text: "два", Date: 101},
+		{ID: 3, SenderName: "Вы", Text: "три", Date: 102},
+	}
+	m.messageCursor = len(m.messages) - 1 // после загрузки — последний индекс
+
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyUp})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when moving cursor, got %v", cmd)
+	}
+	if m.messageCursor != 1 {
+		t.Fatalf("expected cursor 1 after up, got %d", m.messageCursor)
+	}
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.messageCursor != 0 {
+		t.Fatalf("expected cursor 0 after second up, got %d", m.messageCursor)
+	}
+
+	// Верхняя граница: ещё один up не уводит курсор в отрицательные значения.
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.messageCursor != 0 {
+		t.Fatalf("expected cursor clamped to 0, got %d", m.messageCursor)
+	}
+
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.messageCursor != 1 {
+		t.Fatalf("expected cursor 1 after down, got %d", m.messageCursor)
+	}
+
+	// Нижняя граница: на последнем индексе не выходим за конец списка.
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.messageCursor != len(m.messages)-1 {
+		t.Fatalf("expected cursor clamped to %d, got %d", len(m.messages)-1, m.messageCursor)
+	}
+}
+
+// TestMessageCursorSelectedCardUsesDoubleBorder — карточка сообщения под
+// курсором рисуется ДВОЙНОЙ рамкой (╔/╗/╚/╝), остальные — одинарной
+// скруглённой (╭/╮/╰/╯): тот же визуальный язык "это выделено", что у
+// активной панели.
+func TestMessageCursorSelectedCardUsesDoubleBorder(t *testing.T) {
+	msgs := []auth.Message{
+		{ID: 1, SenderName: "А", Text: "первое", Date: 100},
+		{ID: 2, SenderName: "Б", Text: "второе", Date: 101},
+		{ID: 3, SenderName: "В", Text: "третье", Date: 102},
+	}
+
+	content, _ := renderMessages(msgs, 60, false, 1)
+	cards := strings.Split(content, "\n\n")
+	if len(cards) != 3 {
+		t.Fatalf("expected 3 cards, got %d:\n%s", len(cards), content)
+	}
+
+	for _, ch := range []rune{'╔', '╗', '╚', '╝'} {
+		if !strings.ContainsRune(cards[1], ch) {
+			t.Errorf("selected card (index 1) missing double-border char %q, card:\n%s", ch, cards[1])
+		}
+	}
+	for _, idx := range []int{0, 2} {
+		for _, ch := range []rune{'╭', '╮', '╰', '╯'} {
+			if !strings.ContainsRune(cards[idx], ch) {
+				t.Errorf("card %d missing rounded-border char %q, card:\n%s", idx, ch, cards[idx])
+			}
+		}
+		if strings.ContainsRune(cards[idx], '╔') {
+			t.Errorf("card %d must NOT use the double border, card:\n%s", idx, cards[idx])
+		}
+	}
+}
+
+// TestRenderMessagesLineOffsetsMatchActualLines — регрессия на точность
+// lineOffsets: для каждого i строка content с номером lineOffsets[i] должна
+// быть ДЕЙСТВИТЕЛЬНО первой строкой верхней рамки карточки i (содержит ╭ или
+// ╔ — верхний левый угол одной из двух рамок). Карточки разной высоты (тексты
+// разной длины), чтобы смещения не совпадали между сообщениями.
+func TestRenderMessagesLineOffsetsMatchActualLines(t *testing.T) {
+	msgs := []auth.Message{
+		{ID: 1, SenderName: "А", Text: "короткое", Date: 100},
+		{ID: 2, SenderName: "Б", Text: "одно два три четыре пять шесть семь восемь девять десять", Date: 101},
+		{ID: 3, SenderName: "Вы", Text: "ещё одно", Date: 102},
+	}
+
+	content, offsets := renderMessages(msgs, 60, false, 1)
+	lines := strings.Split(content, "\n")
+	if len(offsets) != len(msgs) {
+		t.Fatalf("expected %d offsets, got %d", len(msgs), len(offsets))
+	}
+	for i := range msgs {
+		if offsets[i] < 0 || offsets[i] >= len(lines) {
+			t.Fatalf("offsets[%d]=%d out of range (lines=%d)", i, offsets[i], len(lines))
+		}
+		first := lines[offsets[i]]
+		if !strings.Contains(first, "╭") && !strings.Contains(first, "╔") {
+			t.Errorf("line at offsets[%d]=%d is not a card top border: %q", i, offsets[i], first)
+		}
+		if i > 0 && offsets[i] <= offsets[i-1] {
+			t.Errorf("offsets not strictly increasing: offsets[%d]=%d <= offsets[%d]=%d", i, offsets[i], i-1, offsets[i-1])
+		}
+	}
+}
+
+// TestRerenderScrollsToCursorWhenAboveView — курсор уходит вверх за пределы
+// текущей видимой области: rerenderMessagesAndScrollToCursor прокручивает
+// viewport вверх ровно до верхней строки выбранной карточки.
+func TestRerenderScrollsToCursorWhenAboveView(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m.viewport.Height = 5 // узкий viewport — не всё помещается
+	m.messages = []auth.Message{
+		{ID: 1, SenderName: "А", Text: "сообщение один", Date: 100},
+		{ID: 2, SenderName: "Б", Text: strings.Repeat("длинный текст ", 8), Date: 101},
+		{ID: 3, SenderName: "Вы", Text: strings.Repeat("длинный текст ", 8), Date: 102},
+		{ID: 4, SenderName: "А", Text: "сообщение четыре", Date: 103},
+	}
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0)
+	m.viewport.SetContent(content)
+	m.viewport.GotoBottom()
+	if m.viewport.YOffset == 0 {
+		t.Fatal("test setup invalid: expected viewport scrolled off the top")
+	}
+
+	// Курсор на самом первом сообщении — оно выше видимой области.
+	m.messageCursor = 0
+	m.rerenderMessagesAndScrollToCursor()
+	if m.viewport.YOffset != offsets[m.messageCursor] {
+		t.Fatalf("expected YOffset %d (top of selected card), got %d", offsets[m.messageCursor], m.viewport.YOffset)
+	}
+}
+
+// TestRerenderScrollsToCursorWhenBelowView — симметрично: курсор уходит вниз
+// за пределы видимой области — viewport прокручивается вниз ровно настолько,
+// чтобы верхняя строка выбранной карточки стала последней видимой строкой
+// (либо YOffset == 0, если разница отрицательна — SetYOffset сама клампит,
+// тест естественно проходит в обоих случаях).
+func TestRerenderScrollsToCursorWhenBelowView(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m.viewport.Height = 5
+	m.messages = []auth.Message{
+		{ID: 1, SenderName: "А", Text: "короткое", Date: 100},
+		{ID: 2, SenderName: "Б", Text: "короткое", Date: 101},
+		{ID: 3, SenderName: "Вы", Text: strings.Repeat("длинный текст ", 8), Date: 102},
+		{ID: 4, SenderName: "А", Text: strings.Repeat("длинный текст ", 8), Date: 103},
+	}
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, len(m.messages)-1)
+	m.viewport.SetContent(content)
+	m.viewport.SetYOffset(0)
+	if m.viewport.AtBottom() {
+		t.Fatal("test setup invalid: expected viewport not at bottom")
+	}
+
+	// Курсор на последнем сообщении — оно ниже видимой области.
+	m.messageCursor = len(m.messages) - 1
+	m.rerenderMessagesAndScrollToCursor()
+	want := max(0, offsets[m.messageCursor]-m.viewport.Height+1)
+	if m.viewport.YOffset != want {
+		t.Fatalf("expected YOffset %d, got %d", want, m.viewport.YOffset)
+	}
+}
+
+// TestMessageCursorResetsToLastOnFreshLoad — при любой замене m.messages
+// (здесь — messagesLoadedMsg) messageCursor сбрасывается на последнее
+// сообщение (п.5): курсор всегда синхронизирован с "последнее видимое
+// сообщение", то же поведение, что и автопрокрутка вниз.
+func TestMessageCursorResetsToLastOnFreshLoad(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m.displayedChat = 111
+
+	msgs := []auth.Message{
+		{ID: 1, Text: "первое", SenderName: "Вы", Date: 100},
+		{ID: 2, Text: "второе", SenderName: "Собеседник", Date: 101},
+		{ID: 3, Text: "третье", SenderName: "Вы", Date: 102},
+	}
+	m, _ = updateModel(m, messagesLoadedMsg{chatID: 111, messages: msgs})
+
+	if m.messageCursor != len(msgs)-1 {
+		t.Fatalf("expected messageCursor %d after fresh load, got %d", len(msgs)-1, m.messageCursor)
+	}
+}
+
+// TestUnreadSuffix — суффикс бейджа непрочитанных: " [N]" только при N > 0,
+// при 0 и отрицательном — пустая строка (не " [0]").
+func TestUnreadSuffix(t *testing.T) {
+	if got := unreadSuffix(5); got != "[5]" {
+		t.Errorf("unreadSuffix(5) = %q, want \"[5]\"", got)
+	}
+	if got := unreadSuffix(0); got != "" {
+		t.Errorf("unreadSuffix(0) = %q, want \"\"", got)
+	}
+	if got := unreadSuffix(-3); got != "" {
+		t.Errorf("unreadSuffix(-3) = %q, want \"\"", got)
+	}
+}
+
+// rawChatReadInboxUpdate строит "сырой" TDLib-апдейт updateChatReadInbox.
+func rawChatReadInboxUpdate(chatID float64, unreadCount float64) map[string]interface{} {
+	return map[string]interface{}{
+		"@type":                      "updateChatReadInbox",
+		"chat_id":                    chatID,
+		"last_read_inbox_message_id": float64(1),
+		"unread_count":               unreadCount,
+	}
+}
+
+// rawUnreadCountUpdate строит "сырой" апдейт updateUnreadMessageCount для
+// chatListFolder (folderID) или chatListMain (folderID < 0 → main).
+func rawUnreadCountUpdate(folderID int, unreadCount float64) map[string]interface{} {
+	var chatList map[string]interface{}
+	if folderID < 0 {
+		chatList = map[string]interface{}{"@type": "chatListMain"}
+	} else {
+		chatList = map[string]interface{}{"@type": "chatListFolder", "chat_folder_id": float64(folderID)}
+	}
+	return map[string]interface{}{
+		"@type":                "updateUnreadMessageCount",
+		"chat_list":            chatList,
+		"unread_count":         unreadCount,
+		"unread_unmuted_count": unreadCount,
+	}
+}
+
+// rawUnreadChatCountUpdate строит "сырой" апдейт updateUnreadChatCount
+// (число ЧАТОВ, не сообщений) для chatListFolder (folderID) или
+// chatListMain (folderID < 0 → main) — тот же формат аргументов, что у
+// rawUnreadCountUpdate, но другой @type/поля.
+func rawUnreadChatCountUpdate(folderID int, chatCount float64) map[string]interface{} {
+	var chatList map[string]interface{}
+	if folderID < 0 {
+		chatList = map[string]interface{}{"@type": "chatListMain"}
+	} else {
+		chatList = map[string]interface{}{"@type": "chatListFolder", "chat_folder_id": float64(folderID)}
+	}
+	return map[string]interface{}{
+		"@type":        "updateUnreadChatCount",
+		"chat_list":    chatList,
+		"unread_count": chatCount,
+	}
+}
+
+// TestWaitForChatReadInboxUpdateUpdatesMatchingChat — живой апдейт через канал
+// обновляет UnreadCount у совпадающего чата в m.chats и переподписывается.
+func TestWaitForChatReadInboxUpdateUpdatesMatchingChat(t *testing.T) {
+	fake := &fakeClient{chatReadInboxCh: make(chan map[string]interface{}, 1)}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.chats = []auth.Chat{
+		{ID: 1, Title: "А", UnreadCount: 0},
+		{ID: 2, Title: "Б", UnreadCount: 9},
+	}
+
+	cmd := m.waitForChatReadInboxUpdate()
+	fake.chatReadInboxCh <- rawChatReadInboxUpdate(2, 3)
+	msg := cmd()
+
+	m, resub := updateModel(m, msg)
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd after live update")
+	}
+	if m.chats[0].UnreadCount != 0 {
+		t.Errorf("chat 1 must not change, got %d", m.chats[0].UnreadCount)
+	}
+	if m.chats[1].UnreadCount != 3 {
+		t.Errorf("expected chat 2 UnreadCount 3, got %d", m.chats[1].UnreadCount)
+	}
+}
+
+// TestChatReadInboxUpdateMsgIgnoresUnknownChat — валидный апдейт для чата,
+// которого нет в списке, безвреден и всё равно переподписывается.
+func TestChatReadInboxUpdateMsgIgnoresUnknownChat(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "А"}})
+	m, resub := updateModel(m, chatReadInboxUpdateMsg{chatID: 999, unreadCount: 5, valid: true})
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd for unknown chat")
+	}
+	if m.chats[0].UnreadCount != 0 {
+		t.Errorf("unknown chat must not touch existing chats, got %d", m.chats[0].UnreadCount)
+	}
+}
+
+// TestChatReadInboxUpdateMsgInvalidStillResubscribes — нераспознанный апдейт
+// (valid == false) не портит данные и всё равно переподписывается.
+func TestChatReadInboxUpdateMsgInvalidStillResubscribes(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "А", UnreadCount: 4}})
+	m, resub := updateModel(m, chatReadInboxUpdateMsg{})
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd for invalid update")
+	}
+	if m.chats[0].UnreadCount != 4 {
+		t.Errorf("invalid update must not change UnreadCount, got %d", m.chats[0].UnreadCount)
+	}
+}
+
+// TestChatReadInboxUpdateMsgClosedStopsResubscribing — закрытый канал —
+// единственный случай без переподписки.
+func TestChatReadInboxUpdateMsgClosedStopsResubscribing(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "А"}})
+	m, resub := updateModel(m, chatReadInboxUpdateMsg{closed: true})
+	if resub != nil {
+		t.Fatal("closed channel must not resubscribe, expected nil cmd")
+	}
+}
+
+// TestWaitForUnreadCountUpdateUpdatesFolder — живой апдейт через канал
+// записывает счётчик папки в folderUnread и переподписывается.
+// TestWaitForUnreadCountUpdateIgnoresFolder — unreadCountUpdateMsg (сумма
+// непрочитанных СООБЩЕНИЙ, updateUnreadMessageCount) применяется ТОЛЬКО к
+// folderID==0 ("Все чаты"); апдейт для конкретной папки должен быть
+// проигнорирован — эта метрика для папок не подходит (см.
+// unreadChatCountUpdateMsg ниже, другой источник, другая метрика).
+func TestWaitForUnreadCountUpdateIgnoresFolder(t *testing.T) {
+	fake := &fakeClient{unreadCountCh: make(chan map[string]interface{}, 1)}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.folderUnread[7] = 1
+	m.folderUnread[0] = 100
+
+	cmd := m.waitForUnreadCountUpdate()
+	fake.unreadCountCh <- rawUnreadCountUpdate(7, 12)
+	msg := cmd()
+
+	m, resub := updateModel(m, msg)
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd after live update")
+	}
+	if m.folderUnread[7] != 1 {
+		t.Errorf("folder 7 must be unchanged by unreadCountUpdateMsg (wrong metric), got %d", m.folderUnread[7])
+	}
+	if m.folderUnread[0] != 100 {
+		t.Errorf("folder 0 (Все чаты) must not change, got %d", m.folderUnread[0])
+	}
+}
+
+// TestWaitForUnreadChatCountUpdateUpdatesFolder — unreadChatCountUpdateMsg
+// (число ЧАТОВ, updateUnreadChatCount) применяется ТОЛЬКО к folderID != 0
+// (конкретным папкам); "Все чаты" эту метрику не использует.
+func TestWaitForUnreadChatCountUpdateUpdatesFolder(t *testing.T) {
+	fake := &fakeClient{unreadChatCountCh: make(chan map[string]interface{}, 1)}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.folderUnread[7] = 1
+	m.folderUnread[0] = 100
+
+	cmd := m.waitForUnreadChatCountUpdate()
+	fake.unreadChatCountCh <- rawUnreadChatCountUpdate(7, 13)
+	msg := cmd()
+
+	m, resub := updateModel(m, msg)
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd after live update")
+	}
+	if m.folderUnread[7] != 13 {
+		t.Errorf("expected folder 7 chat count 13, got %d", m.folderUnread[7])
+	}
+	if m.folderUnread[0] != 100 {
+		t.Errorf("folder 0 (Все чаты) must not change, got %d", m.folderUnread[0])
+	}
+}
+
+// TestWaitForUnreadChatCountUpdateIgnoresMain — симметричный случай: апдейт
+// для chatListMain через ЭТОТ канал/метрику должен быть проигнорирован —
+// "Все чаты" берёт бейдж из unreadCountUpdateMsg (сумма сообщений), не
+// отсюда (число чатов).
+func TestWaitForUnreadChatCountUpdateIgnoresMain(t *testing.T) {
+	fake := &fakeClient{unreadChatCountCh: make(chan map[string]interface{}, 1)}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.folderUnread[0] = 100
+
+	cmd := m.waitForUnreadChatCountUpdate()
+	fake.unreadChatCountCh <- rawUnreadChatCountUpdate(-1, 5)
+	msg := cmd()
+
+	m, resub := updateModel(m, msg)
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd after live update")
+	}
+	if m.folderUnread[0] != 100 {
+		t.Errorf("folder 0 (Все чаты) must not change via unreadChatCountUpdateMsg, got %d", m.folderUnread[0])
+	}
+}
+
+// TestWaitForUnreadCountUpdateUpdatesMain — то же для chatListMain: счётчик
+// идёт в folderUnread[0] (синтетическая "Все чаты").
+func TestWaitForUnreadCountUpdateUpdatesMain(t *testing.T) {
+	fake := &fakeClient{unreadCountCh: make(chan map[string]interface{}, 1)}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	cmd := m.waitForUnreadCountUpdate()
+	fake.unreadCountCh <- rawUnreadCountUpdate(-1, 7)
+	msg := cmd()
+
+	m, resub := updateModel(m, msg)
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd for main list update")
+	}
+	if m.folderUnread[0] != 7 {
+		t.Errorf("expected folder 0 unread 7, got %d", m.folderUnread[0])
+	}
+}
+
+// TestUnreadCountUpdateMsgInvalidStillResubscribes — нераспознанный апдейт
+// (valid == false) НЕ пишет шум в folderUnread[0] (иначе ломается счётчик
+// "Все чаты" — см. п.5.4 файла задачи) и всё равно переподписывается.
+func TestUnreadCountUpdateMsgInvalidStillResubscribes(t *testing.T) {
+	m := testModel(t, nil)
+	m.folderUnread[0] = 100
+	m.folderUnread[9] = 1
+
+	m, resub := updateModel(m, unreadCountUpdateMsg{})
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd for invalid update")
+	}
+	if m.folderUnread[0] != 100 {
+		t.Errorf("invalid update must not touch folderUnread[0], got %d", m.folderUnread[0])
+	}
+	if m.folderUnread[9] != 1 {
+		t.Errorf("invalid update must not touch folder 9, got %d", m.folderUnread[9])
+	}
+}
+
+// TestUnreadCountUpdateMsgClosedStopsResubscribing — закрытый канал —
+// единственный случай без переподписки.
+func TestUnreadCountUpdateMsgClosedStopsResubscribing(t *testing.T) {
+	m := testModel(t, nil)
+	m, resub := updateModel(m, unreadCountUpdateMsg{closed: true})
+	if resub != nil {
+		t.Fatal("closed channel must not resubscribe, expected nil cmd")
+	}
+}
+
+// TestFoldersPaneShowsUnreadSuffix — панель «Папки» показывает " [N]" справа
+// от имени при N > 0 (в т.ч. у синтетической "Все чаты"), и не показывает
+// "[0]" при нуле.
+func TestFoldersPaneShowsUnreadSuffix(t *testing.T) {
+	m := testModel(t, nil)
+	m.folders = []auth.Folder{{ID: 7, Name: "Работа"}, {ID: 8, Name: "Друзья"}}
+	m.folderUnread = map[int32]int32{0: 3, 7: 12}
+
+	pane := m.foldersPane()
+	// "Все чаты [3]" — ровно 1 пробел: имя+бейдж вместе заполняют всю
+	// доступную ширину строки, зазору взяться неоткуда (см. alignBadge).
+	if !strings.Contains(pane, "Все чаты [3]") {
+		t.Errorf("main list must show '[3]' right after the name, pane:\n%s", pane)
+	}
+	// "Работа  [12]" — 2 пробела: короче доступной ширины, alignBadge
+	// прижимает бейдж к правому краю строки (по правке человека), а не
+	// дописывает его сразу после имени.
+	if !strings.Contains(pane, "Работа  [12]") {
+		t.Errorf("folder 7 must show '[12]' right-aligned (2 spaces before it), pane:\n%s", pane)
+	}
+	if strings.Contains(pane, "Друзья [0]") || strings.Contains(pane, "Друзья  [0]") {
+		t.Errorf("folder with 0 unread must not show '[0]', pane:\n%s", pane)
+	}
+
+	// Нулевые счётчики вообще не дают суффикса.
+	m.folderUnread = map[int32]int32{0: 0, 7: 0}
+	pane = m.foldersPane()
+	if strings.Contains(pane, "[0]") {
+		t.Errorf("all-zero counts must not render any suffix, pane:\n%s", pane)
+	}
+}
+
+// TestChatTitlesAppendUnreadSuffix — chatTitles добавляет " [N]" к названию
+// чата только при N > 0.
+func TestChatTitlesAppendUnreadSuffix(t *testing.T) {
+	chats := []auth.Chat{
+		{ID: 1, Title: "А", UnreadCount: 0},
+		{ID: 2, Title: "Б", UnreadCount: 4},
+		{ID: 3, Title: "В", UnreadCount: -1},
+	}
+	// chatTitles больше НЕ дописывает бейдж в название (по правке
+	// человека — бейдж выравнивается по правому краю строки, а не
+	// приклеивается к названию) — названия остаются как есть, бейджи
+	// отдельно в chatBadges, тем же порядком/длиной.
+	got := chatTitles(chats)
+	want := []string{"А", "Б", "В"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chatTitles = %#v, want %#v", got, want)
+	}
+	gotBadges := chatBadges(chats)
+	wantBadges := []string{"", "[4]", ""}
+	if !reflect.DeepEqual(gotBadges, wantBadges) {
+		t.Errorf("chatBadges = %#v, want %#v", gotBadges, wantBadges)
+	}
+}
+
+// TestChatPaneRightAlignsUnreadBadge — бейдж непрочитанных в панели чатов
+// прижат к правому краю строки, а не дописан сразу после названия (по
+// прямому запросу человека: "количество непрочитанных должно выравниваться
+// по правой стороне").
+func TestChatPaneRightAlignsUnreadBadge(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "Ирина", UnreadCount: 7}})
+	pane := m.chatPane()
+	if strings.Contains(pane, "Ирина [7]") {
+		t.Errorf("badge must NOT be glued right after the name, pane:\n%s", pane)
+	}
+	if !strings.Contains(pane, "[7]") {
+		t.Errorf("badge must still be present somewhere in the pane, pane:\n%s", pane)
+	}
+	lines := strings.Split(pane, "\n")
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "Ирина") && strings.Contains(line, "[7]") {
+			found = true
+			// Между именем и бейджем — минимум 2 пробела (chatsPaneW=30
+			// заведомо шире "Ирина"+"[7]", есть куда прижимать вправо).
+			if !strings.Contains(line, "Ирина  ") {
+				t.Errorf("badge must be right-aligned with a visible gap, line: %q", line)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no line contains both the name and the badge, pane:\n%s", pane)
+	}
+}
+
+// cancellingCheckClient — fakeClient, у которого Send с leaveChat/
+// deleteChatHistory вызывает t.Fatal: в сценариях ОТМЕНЫ удаления эти
+// необратимые запросы не должны уходить в TDLib вообще. Реальная проверка
+// ОТСУТСТВИЯ вызова (смена mode сама по себе этого не доказывает).
+type cancellingCheckClient struct {
+	fakeClient
+	t *testing.T
+}
+
+func (c *cancellingCheckClient) Send(ctx context.Context, request map[string]interface{}) (map[string]interface{}, error) {
+	switch request["@type"] {
+	case "leaveChat", "deleteChatHistory":
+		c.t.Fatal("expected no leaveChat/deleteChatHistory call in cancellation scenario")
+	}
+	return c.fakeClient.Send(ctx, request)
+}
+
+// confirmDeleteModel строит модель в режиме подтверждения удаления (modeConfirmDelete)
+// для первого чата переданного списка — общий setup для confirm-сценариев.
+func confirmDeleteModel(t *testing.T, client auth.TDClientInterface, chats []auth.Chat) Model {
+	t.Helper()
+	m := New(client, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = updateModel(m, chatsLoadedMsg{chats: chats})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyTab}) // фокус в список чатов
+	m, _ = updateModel(m, keyRune('d'))
+	if m.mode != modeConfirmDelete {
+		t.Fatalf("setup: expected modeConfirmDelete, got %v", m.mode)
+	}
+	return m
+}
+
+// TestDeleteChatHotkeyIgnoredOutsideChatList — хоткей DeleteChat ничего не
+// делает (мод не меняется, команды не возвращаются), когда фокус вне панели
+// чатов, активны результаты поиска или список чатов пуст.
+func TestDeleteChatHotkeyIgnoredOutsideChatList(t *testing.T) {
+	// Фокус не на списке чатов (стартовый фокус — панель папок).
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "A", IsGroup: true}})
+	m, cmd := updateModel(m, keyRune('d'))
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal outside chat pane, got %v", m.mode)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil cmd outside chat pane, got %v", cmd)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected unchanged mode, got %v", m.mode)
+	}
+
+	// Активный поиск: хоткей в списке чатов, но searchActive=true.
+	m = testModel(t, []auth.Chat{{ID: 2, Title: "B"}})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyTab})
+	m.searchActive = true
+	m.searchResults = auth.SearchResults{Chats: []auth.SearchResultChat{{ID: 3, Title: "X"}}}
+	m, cmd = updateModel(m, keyRune('d'))
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal with searchActive, got %v", m.mode)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil cmd with searchActive, got %v", cmd)
+	}
+
+	// Пустой список чатов.
+	m = testModel(t, nil)
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, cmd = updateModel(m, keyRune('d'))
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal with empty chats, got %v", m.mode)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil cmd with empty chats, got %v", cmd)
+	}
+}
+
+// TestDeleteChatHotkeyEntersConfirmMode — хоткей в обычном состоянии переводит
+// в modeConfirmDelete и сохраняет корректные deleteTarget* (ID, группа/личный,
+// название), deleteStep=0.
+func TestDeleteChatHotkeyEntersConfirmMode(t *testing.T) {
+	m := testModel(t, []auth.Chat{
+		{ID: 111, Title: "Группа", IsGroup: true},
+		{ID: 222, Title: "Личный"},
+	})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyTab}) // фокус в список чатов
+
+	m, cmd := updateModel(m, keyRune('d'))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on entering confirm mode, got %v", cmd)
+	}
+	if m.mode != modeConfirmDelete {
+		t.Fatalf("expected modeConfirmDelete, got %v", m.mode)
+	}
+	if m.deleteTargetChatID != 111 {
+		t.Fatalf("expected deleteTargetChatID 111, got %d", m.deleteTargetChatID)
+	}
+	if m.deleteTargetTitle != "Группа" {
+		t.Fatalf("expected deleteTargetTitle Группа, got %q", m.deleteTargetTitle)
+	}
+	if !m.deleteTargetGroup {
+		t.Fatal("expected deleteTargetGroup true for group chat")
+	}
+	if m.deleteStep != 0 {
+		t.Fatalf("expected deleteStep 0, got %d", m.deleteStep)
+	}
+
+	// Отмена (Esc) возвращает в Normal, затем курсор вниз — и второй чат
+	// (личный) заполняет цель с IsGroup=false.
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after Esc, got %v", m.mode)
+	}
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = updateModel(m, keyRune('d'))
+	if m.mode != modeConfirmDelete {
+		t.Fatalf("expected modeConfirmDelete for personal chat, got %v", m.mode)
+	}
+	if m.deleteTargetChatID != 222 {
+		t.Fatalf("expected deleteTargetChatID 222, got %d", m.deleteTargetChatID)
+	}
+	if m.deleteTargetGroup {
+		t.Fatal("expected deleteTargetGroup false for personal chat")
+	}
+	if m.deleteTargetTitle != "Личный" {
+		t.Fatalf("expected deleteTargetTitle Личный, got %q", m.deleteTargetTitle)
+	}
+}
+
+// TestDeleteConfirmGroupCancel — на единственном шаге группы n (или Esc) —
+// полная отмена: возврат в modeNormal БЕЗ вызова leaveChatCmd (cancellingCheckClient
+// упадёт с t.Fatal, если запрос всё же уйдёт).
+func TestDeleteConfirmGroupCancel(t *testing.T) {
+	for _, key := range []tea.KeyMsg{keyRune('n'), {Type: tea.KeyEsc}} {
+		m := confirmDeleteModel(t, &cancellingCheckClient{t: t}, []auth.Chat{{ID: 111, Title: "Группа", IsGroup: true}})
+		m, cmd := updateModel(m, key)
+		if m.mode != modeNormal {
+			t.Fatalf("key %s: expected modeNormal after cancel, got %v", key.String(), m.mode)
+		}
+		if cmd != nil {
+			t.Fatalf("key %s: expected nil cmd on cancel, got %v", key.String(), cmd)
+		}
+	}
+}
+
+// TestDeleteConfirmGroupYesLeavesAndRemoves — y на группе запускает
+// leaveChatCmd(111); chatActionDoneMsg{err:nil} убирает чат из m.chats.
+func TestDeleteConfirmGroupYesLeavesAndRemoves(t *testing.T) {
+	fake := &fakeClient{responses: []map[string]interface{}{{"@type": "ok"}}}
+	m := confirmDeleteModel(t, fake, []auth.Chat{{ID: 111, Title: "Группа", IsGroup: true}})
+
+	m, cmd := updateModel(m, keyRune('y'))
+	if cmd == nil {
+		t.Fatal("expected non-nil leaveChat cmd")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after confirm, got %v", m.mode)
+	}
+	if m.status != "Покидаем чат…" {
+		t.Fatalf("expected status Покидаем чат…, got %q", m.status)
+	}
+
+	done, ok := cmd().(chatActionDoneMsg)
+	if !ok {
+		t.Fatalf("expected chatActionDoneMsg, got %T", cmd())
+	}
+	if done.chatID != 111 || done.err != nil {
+		t.Fatalf("unexpected chatActionDoneMsg: %+v", done)
+	}
+
+	m, cmd = updateModel(m, done)
+	if cmd != nil {
+		t.Fatalf("expected nil cmd after chatActionDoneMsg, got %v", cmd)
+	}
+	if len(m.chats) != 0 {
+		t.Fatalf("expected chat removed from list, got %v", m.chats)
+	}
+	if m.status != "Готово" {
+		t.Fatalf("expected status Готово, got %q", m.status)
+	}
+
+	foundLeave := false
+	for _, req := range fake.requests {
+		if req["@type"] == "leaveChat" && req["chat_id"] == int64(111) {
+			foundLeave = true
+		}
+	}
+	if !foundLeave {
+		t.Fatalf("expected leaveChat(111) request, got %v", fake.requests)
+	}
+}
+
+// TestDeleteConfirmPrivateStep0YesAdvancesNotSends — y на шаге 0 личного чата
+// переводит deleteStep в 1, НЕ меняет mode и НЕ вызывает deleteChatCmd
+// (cancellingCheckClient докажет t.Fatal'ом, если запрос всё же уйдёт).
+func TestDeleteConfirmPrivateStep0YesAdvancesNotSends(t *testing.T) {
+	m := confirmDeleteModel(t, &cancellingCheckClient{t: t}, []auth.Chat{{ID: 222, Title: "Личный"}})
+
+	m, cmd := updateModel(m, keyRune('y'))
+	if cmd != nil {
+		t.Fatalf("expected no cmd on step 0 yes, got %v", cmd)
+	}
+	if m.mode != modeConfirmDelete {
+		t.Fatalf("expected modeConfirmDelete still, got %v", m.mode)
+	}
+	if m.deleteStep != 1 {
+		t.Fatalf("expected deleteStep 1, got %d", m.deleteStep)
+	}
+}
+
+// TestDeleteConfirmPrivateStep1RevokeAndCancel — шаг 1 личного чата: y →
+// deleteChatHistory(revoke=true), n → deleteChatHistory(revoke=false), Esc —
+// полная отмена БЕЗ вызова.
+func TestDeleteConfirmPrivateStep1RevokeAndCancel(t *testing.T) {
+	// y → revoke=true.
+	fake := &fakeClient{}
+	m := confirmDeleteModel(t, fake, []auth.Chat{{ID: 222, Title: "Личный"}})
+	m, _ = updateModel(m, keyRune('y')) // шаг 0 подтверждён
+	if m.mode != modeConfirmDelete || m.deleteStep != 1 {
+		t.Fatalf("setup: expected step 1 confirm mode, got mode=%v step=%d", m.mode, m.deleteStep)
+	}
+	m, cmd := updateModel(m, keyRune('y'))
+	if cmd == nil {
+		t.Fatal("expected non-nil deleteChat cmd (revoke=true)")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after step 1 yes, got %v", m.mode)
+	}
+	if m.status != "Удаляем чат…" {
+		t.Fatalf("expected status Удаляем чат…, got %q", m.status)
+	}
+	if _, ok := cmd().(chatActionDoneMsg); !ok {
+		t.Fatalf("expected chatActionDoneMsg, got %T", cmd())
+	}
+	assertDeleteChatRequest(t, fake.requests, 222, true)
+
+	// n → revoke=false.
+	fake = &fakeClient{responses: []map[string]interface{}{{"@type": "ok"}}}
+	m = confirmDeleteModel(t, fake, []auth.Chat{{ID: 222, Title: "Личный"}})
+	m, _ = updateModel(m, keyRune('y'))
+	m, cmd = updateModel(m, keyRune('n'))
+	if cmd == nil {
+		t.Fatal("expected non-nil deleteChat cmd (revoke=false)")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after step 1 no, got %v", m.mode)
+	}
+	if _, ok := cmd().(chatActionDoneMsg); !ok {
+		t.Fatalf("expected chatActionDoneMsg, got %T", cmd())
+	}
+	assertDeleteChatRequest(t, fake.requests, 222, false)
+
+	// Esc на шаге 1 — отмена без вызова DeleteChatHistory.
+	m = confirmDeleteModel(t, &cancellingCheckClient{t: t}, []auth.Chat{{ID: 222, Title: "Личный"}})
+	m, _ = updateModel(m, keyRune('y'))
+	m, cmd = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on step 1 Esc, got %v", cmd)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after step 1 Esc, got %v", m.mode)
+	}
+}
+
+// assertDeleteChatRequest проверяет, что среди запросов есть ровно один
+// deleteChatHistory с нужным chat_id/revoke (и remove_from_chat_list=true).
+func assertDeleteChatRequest(t *testing.T, requests []map[string]interface{}, chatID int64, revoke bool) {
+	t.Helper()
+	for _, req := range requests {
+		if req["@type"] == "deleteChatHistory" {
+			if req["chat_id"] != chatID {
+				t.Fatalf("expected deleteChatHistory chat_id %d, got %v", chatID, req["chat_id"])
+			}
+			if got, ok := req["revoke"].(bool); !ok || got != revoke {
+				t.Fatalf("expected deleteChatHistory revoke=%v, got %v", revoke, req["revoke"])
+			}
+			if got, ok := req["remove_from_chat_list"].(bool); !ok || !got {
+				t.Fatalf("expected deleteChatHistory remove_from_chat_list=true, got %v", req["remove_from_chat_list"])
+			}
+			return
+		}
+	}
+	t.Fatalf("expected deleteChatHistory(%d, revoke=%v) request, got %v", chatID, revoke, requests)
+}
+
+// TestChatActionDoneMsgErrorDoesNotTouchChats — история с ошибкой не меняет
+// m.chats и показывает статус с текстом ошибки.
+func TestChatActionDoneMsgErrorDoesNotTouchChats(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "A"}})
+	m.chatCursor = 0
+
+	m, _ = updateModel(m, chatActionDoneMsg{chatID: 111, err: errors.New("network")})
+	if len(m.chats) != 1 {
+		t.Fatalf("expected chats untouched on error, got %v", m.chats)
+	}
+	if !strings.Contains(m.status, "network") {
+		t.Fatalf("expected status with error text, got %q", m.status)
+	}
+}
+
+// TestChatActionDoneMsgClosesDisplayedChat — успешное удаление чата, который
+// был открыт в msgPane, сбрасывает displayedChat/messages и клампит курсор.
+func TestChatActionDoneMsgClosesDisplayedChat(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}, {ID: 222, Title: "Другой"}})
+	m.displayedChat = 111
+	m.messages = []auth.Message{{ID: 1, Text: "текст", SenderName: "Вы"}}
+	m.messageCursor = 0
+	m.chatCursor = 1 // после удаления 111 из 2-элементного списка нужно заклампить к 0
+
+	m, _ = updateModel(m, chatActionDoneMsg{chatID: 111, err: nil})
+	if len(m.chats) != 1 || m.chats[0].ID != 222 {
+		t.Fatalf("expected chat 111 removed, got %v", m.chats)
+	}
+	if m.displayedChat != 0 {
+		t.Fatalf("expected displayedChat reset to 0, got %d", m.displayedChat)
+	}
+	if len(m.messages) != 0 {
+		t.Fatalf("expected messages cleared, got %v", m.messages)
+	}
+	if m.chatCursor != 0 {
+		t.Fatalf("expected chatCursor clamped to 0, got %d", m.chatCursor)
+	}
+	if m.status != "Готово" {
+		t.Fatalf("expected status Готово, got %q", m.status)
 	}
 }

@@ -58,6 +58,18 @@ func (m *mockTDClient) ChatFolderUpdates() <-chan map[string]interface{} {
 	return nil
 }
 
+func (m *mockTDClient) ChatReadInboxUpdates() <-chan map[string]interface{} {
+	return nil
+}
+
+func (m *mockTDClient) UnreadCountUpdates() <-chan map[string]interface{} {
+	return nil
+}
+
+func (m *mockTDClient) UnreadChatCountUpdates() <-chan map[string]interface{} {
+	return nil
+}
+
 func (m *mockTDClient) Close() {
 	close(m.authCh)
 }

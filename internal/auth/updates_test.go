@@ -154,3 +154,232 @@ func TestParseNewMessageUpdateBrokenChatID(t *testing.T) {
 		t.Fatal("expected ok == false when chat_id is not a number")
 	}
 }
+
+func TestParseChatReadInboxUpdateValid(t *testing.T) {
+	update := map[string]interface{}{
+		"@type":                      "updateChatReadInbox",
+		"chat_id":                    float64(42),
+		"last_read_inbox_message_id": float64(100),
+		"unread_count":               float64(5),
+	}
+	chatID, unreadCount, ok := ParseChatReadInboxUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for valid updateChatReadInbox")
+	}
+	if chatID != 42 {
+		t.Errorf("expected chatID 42, got %d", chatID)
+	}
+	if unreadCount != 5 {
+		t.Errorf("expected unreadCount 5, got %d", unreadCount)
+	}
+}
+
+func TestParseChatReadInboxUpdateWrongType(t *testing.T) {
+	update := map[string]interface{}{"@type": "updateAuthorizationState"}
+	if _, _, ok := ParseChatReadInboxUpdate(update); ok {
+		t.Fatal("expected ok == false for wrong @type")
+	}
+}
+
+func TestParseChatReadInboxUpdateMissingFields(t *testing.T) {
+	// Нет chat_id.
+	update := map[string]interface{}{"@type": "updateChatReadInbox", "unread_count": float64(5)}
+	if _, _, ok := ParseChatReadInboxUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_id missing")
+	}
+	// Нет unread_count.
+	update = map[string]interface{}{"@type": "updateChatReadInbox", "chat_id": float64(42)}
+	if _, _, ok := ParseChatReadInboxUpdate(update); ok {
+		t.Fatal("expected ok == false when unread_count missing")
+	}
+	// chat_id не число.
+	update = map[string]interface{}{"@type": "updateChatReadInbox", "chat_id": "42", "unread_count": float64(5)}
+	if _, _, ok := ParseChatReadInboxUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_id is not a number")
+	}
+}
+
+func TestParseUnreadMessageCountUpdateMain(t *testing.T) {
+	update := map[string]interface{}{
+		"@type": "updateUnreadMessageCount",
+		"chat_list": map[string]interface{}{
+			"@type": "chatListMain",
+		},
+		"unread_count":         float64(3),
+		"unread_unmuted_count": float64(2),
+	}
+	folderID, unreadCount, ok := ParseUnreadMessageCountUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for chatListMain")
+	}
+	if folderID != 0 {
+		t.Errorf("expected folderID 0 (Все чаты), got %d", folderID)
+	}
+	// unread_count (3, ВКЛЮЧАЯ замьюченные), НЕ unread_unmuted_count (2) —
+	// по живой проверке человека: у "Все чаты" в самом Telegram бейдж
+	// считает сумму непрочитанных сообщений без фильтра по mute (в отличие
+	// от папок — там другая метрика, число чатов, см.
+	// TestParseUnreadChatCountUpdateFolder).
+	if unreadCount != 3 {
+		t.Errorf("expected unreadCount 3 (unread_count), got %d", unreadCount)
+	}
+}
+
+func TestParseUnreadMessageCountUpdateFolder(t *testing.T) {
+	// Парсер технически разбирает chatListFolder тоже (для полноты), но
+	// результат для folderID != 0 в internal/tui игнорируется — папки
+	// берут бейдж из ParseUnreadChatCountUpdate (другая метрика).
+	update := map[string]interface{}{
+		"@type": "updateUnreadMessageCount",
+		"chat_list": map[string]interface{}{
+			"@type":          "chatListFolder",
+			"chat_folder_id": float64(9),
+		},
+		"unread_count": float64(517),
+	}
+	folderID, unreadCount, ok := ParseUnreadMessageCountUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for chatListFolder")
+	}
+	if folderID != 9 {
+		t.Errorf("expected folderID 9, got %d", folderID)
+	}
+	if unreadCount != 517 {
+		t.Errorf("expected unreadCount 517, got %d", unreadCount)
+	}
+}
+
+func TestParseUnreadMessageCountUpdateArchive(t *testing.T) {
+	// chatListArchive этой задачей не показывается — ok == false.
+	update := map[string]interface{}{
+		"@type": "updateUnreadMessageCount",
+		"chat_list": map[string]interface{}{
+			"@type": "chatListArchive",
+		},
+		"unread_count": float64(1),
+	}
+	if _, _, ok := ParseUnreadMessageCountUpdate(update); ok {
+		t.Fatal("expected ok == false for chatListArchive")
+	}
+}
+
+func TestParseUnreadMessageCountUpdateWrongType(t *testing.T) {
+	update := map[string]interface{}{"@type": "updateAuthorizationState"}
+	if _, _, ok := ParseUnreadMessageCountUpdate(update); ok {
+		t.Fatal("expected ok == false for wrong @type")
+	}
+}
+
+func TestParseUnreadMessageCountUpdateMissingFields(t *testing.T) {
+	// Нет unread_count.
+	update := map[string]interface{}{
+		"@type":     "updateUnreadMessageCount",
+		"chat_list": map[string]interface{}{"@type": "chatListMain"},
+	}
+	if _, _, ok := ParseUnreadMessageCountUpdate(update); ok {
+		t.Fatal("expected ok == false when unread_count missing")
+	}
+	// Нет chat_list.
+	update = map[string]interface{}{"@type": "updateUnreadMessageCount", "unread_count": float64(2)}
+	if _, _, ok := ParseUnreadMessageCountUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_list missing")
+	}
+	// chat_listFolder без chat_folder_id.
+	update = map[string]interface{}{
+		"@type":        "updateUnreadMessageCount",
+		"chat_list":    map[string]interface{}{"@type": "chatListFolder"},
+		"unread_count": float64(2),
+	}
+	if _, _, ok := ParseUnreadMessageCountUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_folder_id missing")
+	}
+}
+
+// TestParseUnreadChatCountUpdateFolder — папка (не "Все чаты"): бейдж — ЧИСЛО
+// ЧАТОВ с непрочитанным (unread_count у updateUnreadChatCount), ВКЛЮЧАЯ
+// замьюченные — по живой проверке человека (12 замьюченных + 1 незамьюченный
+// чат с непрочитанным = "13" в самом Telegram).
+func TestParseUnreadChatCountUpdateFolder(t *testing.T) {
+	update := map[string]interface{}{
+		"@type": "updateUnreadChatCount",
+		"chat_list": map[string]interface{}{
+			"@type":          "chatListFolder",
+			"chat_folder_id": float64(9),
+		},
+		"total_count":          float64(50),
+		"unread_count":         float64(13),
+		"unread_unmuted_count": float64(1),
+	}
+	folderID, chatCount, ok := ParseUnreadChatCountUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for chatListFolder")
+	}
+	if folderID != 9 {
+		t.Errorf("expected folderID 9, got %d", folderID)
+	}
+	// unread_count (13, ВКЛЮЧАЯ замьюченные), НЕ unread_unmuted_count (1).
+	if chatCount != 13 {
+		t.Errorf("expected chatCount 13 (unread_count, includes muted), got %d", chatCount)
+	}
+}
+
+func TestParseUnreadChatCountUpdateMain(t *testing.T) {
+	update := map[string]interface{}{
+		"@type":        "updateUnreadChatCount",
+		"chat_list":    map[string]interface{}{"@type": "chatListMain"},
+		"unread_count": float64(42),
+	}
+	folderID, chatCount, ok := ParseUnreadChatCountUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for chatListMain")
+	}
+	if folderID != 0 {
+		t.Errorf("expected folderID 0, got %d", folderID)
+	}
+	if chatCount != 42 {
+		t.Errorf("expected chatCount 42, got %d", chatCount)
+	}
+}
+
+func TestParseUnreadChatCountUpdateArchive(t *testing.T) {
+	update := map[string]interface{}{
+		"@type":        "updateUnreadChatCount",
+		"chat_list":    map[string]interface{}{"@type": "chatListArchive"},
+		"unread_count": float64(1),
+	}
+	if _, _, ok := ParseUnreadChatCountUpdate(update); ok {
+		t.Fatal("expected ok == false for chatListArchive")
+	}
+}
+
+func TestParseUnreadChatCountUpdateWrongType(t *testing.T) {
+	update := map[string]interface{}{"@type": "updateAuthorizationState"}
+	if _, _, ok := ParseUnreadChatCountUpdate(update); ok {
+		t.Fatal("expected ok == false for wrong @type")
+	}
+}
+
+func TestParseUnreadChatCountUpdateMissingFields(t *testing.T) {
+	// Нет unread_count.
+	update := map[string]interface{}{
+		"@type":     "updateUnreadChatCount",
+		"chat_list": map[string]interface{}{"@type": "chatListMain"},
+	}
+	if _, _, ok := ParseUnreadChatCountUpdate(update); ok {
+		t.Fatal("expected ok == false when unread_count missing")
+	}
+	// Нет chat_list.
+	update = map[string]interface{}{"@type": "updateUnreadChatCount", "unread_count": float64(2)}
+	if _, _, ok := ParseUnreadChatCountUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_list missing")
+	}
+	// chatListFolder без chat_folder_id.
+	update = map[string]interface{}{
+		"@type":        "updateUnreadChatCount",
+		"chat_list":    map[string]interface{}{"@type": "chatListFolder"},
+		"unread_count": float64(2),
+	}
+	if _, _, ok := ParseUnreadChatCountUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_folder_id missing")
+	}
+}

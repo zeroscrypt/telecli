@@ -7,7 +7,7 @@ A terminal Telegram client with vim-like modal input. Written in Go, protocol co
 - Three panes: folders → chats → message feed, switch with `Tab`/arrows/number keys `1`/`2`/`3`.
 - `Normal`/`Insert`/`Command` modes, vim-style.
 - Live updates for incoming messages without re-opening the chat.
-- Multi-line draft, file sending (`ctrl+f`), external `$EDITOR` for long messages (`ctrl+e`).
+- Multi-line draft, file sending (`ctrl+f`).
 - Send text and files straight from the shell, without entering the TUI: `telecli send ...`.
 - Configurable keybindings (`keybindings.toml`) and interface options (`settings.toml`).
 
@@ -114,7 +114,6 @@ telecli send -m "for a channel" -- -1001234567890 # negative chat_id — after "
 | `/` | search chats/channels/contacts |
 | `t` | "about" screen — full list of keybindings |
 | `d` | leave/delete the chat under the cursor (with confirmation) |
-| `ctrl+e` | open the draft in an external `$EDITOR` |
 | `ctrl+f` | send a file (path prompt) |
 | `q`, `ctrl+c` | quit |
 
@@ -128,7 +127,6 @@ All keybindings can be overridden in `<config dir>/telecli/keybindings.toml` (cr
 `<config dir>/telecli/settings.toml`:
 
 ```toml
-editor = "nano"           # priority: this field → $EDITOR → vi
 align_own_right = true    # right-align your own messages (enabled by default)
 ```
 
