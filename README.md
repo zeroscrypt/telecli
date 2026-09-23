@@ -13,34 +13,58 @@ A terminal Telegram client with vim-like modal input. Written in Go, protocol co
 
 ## Installation
 
-### Quick install (prebuilt binary)
+Three ways to get `telecli`, pick one:
 
-Every [release](https://github.com/zeroscrypt/telecli/releases) has statically linked binaries
-attached — no TDLib install, no compiler needed:
+- **[Option A — macOS (Apple Silicon), prebuilt binary](#option-a--macos-apple-silicon-prebuilt-binary)** — fastest, no TDLib install.
+- **[Option B — Linux (x86_64), prebuilt binary](#option-b--linux-x86_64-prebuilt-binary)** — same, for Linux.
+- **[Option C — build from source](#option-c--build-from-source)** — any platform; for auditing what
+  you run, or if you're not on one of the two platforms above.
+
+### Option A — macOS (Apple Silicon), prebuilt binary
 
 ```sh
-# macOS (Apple Silicon)
-curl -LO https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-darwin-arm64
-chmod +x telecli-darwin-arm64
-./telecli-darwin-arm64
-
-# Linux (x86_64)
-curl -LO https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-linux-amd64
-chmod +x telecli-linux-amd64
-./telecli-linux-amd64
+mkdir -p ~/.local/bin
+curl -fsSL -o ~/.local/bin/telecli https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-darwin-arm64
+chmod +x ~/.local/bin/telecli
 ```
 
-macOS will refuse to run the downloaded binary the first time (Gatekeeper, unsigned) — either
-right-click it and choose "Open" once, or run `xattr -d com.apple.quarantine ./telecli-darwin-arm64`.
+If `~/.local/bin` isn't already in your `PATH`, add this line to `~/.zshrc` (or `~/.bashrc`) and
+restart your terminal:
 
-Other platforms (Windows, Linux arm64, macOS Intel) don't have prebuilt binaries yet — build from
-source instead, see below.
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
-Then skip straight to ["Get Telegram application credentials"](#get-telegram-application-credentials).
+Then just run `telecli` from anywhere. (Downloaded via `curl`, not a browser, so macOS Gatekeeper
+doesn't quarantine it — no extra "allow in Security settings" step needed.)
 
-### Build from source
+To reinstall/update later, run the same three lines again — `curl -o` overwrites the old file.
 
-Needed for platforms without a prebuilt binary, or if you want to build from a specific commit.
+### Option B — Linux (x86_64), prebuilt binary
+
+```sh
+mkdir -p ~/.local/bin
+curl -fsSL -o ~/.local/bin/telecli https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-linux-amd64
+chmod +x ~/.local/bin/telecli
+```
+
+If `~/.local/bin` isn't already in your `PATH`, add this line to `~/.bashrc` (or your shell's
+equivalent) and restart your terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then just run `telecli` from anywhere. To reinstall/update later, run the same three lines again.
+
+*(Both options above are statically linked — no separate TDLib install, no other runtime
+dependency. Prefer one command that detects your platform automatically instead? See
+[`install.sh`](install.sh) — `curl -fsSL https://raw.githubusercontent.com/zeroscrypt/telecli/public/install.sh | sh` does the same thing as Option A/B, just without picking the file yourself. Inspect it before piping to `sh` if you'd rather not run someone else's script blind — it's short.)*
+
+### Option C — build from source
+
+For platforms without a prebuilt binary, or if you'd rather compile it yourself than run a binary
+you haven't audited.
 
 #### Dependencies
 
@@ -101,6 +125,8 @@ If an old packaged TDLib is also installed on the machine, make sure
 build against the old version.
 
 ### Get Telegram application credentials
+
+Needed regardless of which option (A/B/C) you used above.
 
 Register an application at [my.telegram.org](https://my.telegram.org) → "API development tools" →
 get `api_id` and `api_hash`. Pass them once via environment variables on first run — they'll be
@@ -166,8 +192,8 @@ repository's GitHub Releases) — if found, `vX.Y.Z → vX.Y.Z+1 (:update)` appe
 the bottom line. To check manually and see the result explicitly, use the `:update` command in
 Normal mode (`:` → `update` → `Enter`). The command only shows that a newer version is available —
 there's no automatic binary replacement yet, update by downloading the new release from the
-[Releases page](https://github.com/zeroscrypt/telecli/releases) (see "Quick install" above) or
-rebuilding from source.
+[Releases page](https://github.com/zeroscrypt/telecli/releases) (Option A/B commands above
+overwrite the old binary) or rebuilding from source (Option C).
 
 ## Releases
 
@@ -182,8 +208,8 @@ based on [Conventional Commits](https://www.conventionalcommits.org/) in this br
 
 On every push here, Release Please updates an open Release PR with the accumulated `CHANGELOG.md`
 and the next version; merging that PR creates the git tag and GitHub Release. Publishing that
-release automatically triggers a second workflow that builds the binaries (statically linked, see
-"Quick install" above) and attaches them to it — no manual step.
+release automatically triggers a second workflow that builds the binaries (Option A/B above) and
+attaches them to it — no manual step.
 
 ## License
 
