@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -202,6 +205,12 @@ type updateCheckMsg struct {
 	explicit bool
 }
 
+// updateInstallMsg — результат установки обновления (update.InstallBinary).
+type updateInstallMsg struct {
+	version string // тег версии, на которую обновились (для статуса при успехе)
+	err     error
+}
+
 // Model — bubbletea-модель основного экрана: папки слева, список чатов
 // выбранной папки в центре, лента сообщений выбранного чата справа. Ввод —
 // vim-модальный, биндинги читаются из конфигурации (config.KeyBindings); из
@@ -249,8 +258,9 @@ type Model struct {
 	width, height int
 	status        string
 
-	version         string
-	updateAvailable string // "" — обновление не найдено/не проверялось; иначе — тег новой версии
+	version          string
+	updateAvailable  string // "" — обновление не найдено/не проверялось; иначе — тег новой версии
+	installingUpdate bool   // защита от повторного запуска установки
 
 	mode         appMode
 	keys         KeyMap
@@ -711,6 +721,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case updateInstallMsg:
+		m.installingUpdate = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Обновление не удалось: %v", msg.err)
+			return m, nil
+		}
+		m.updateAvailable = ""
+		m.status = fmt.Sprintf("Обновлено до %s — перезапустите telecli, чтобы применить", msg.version)
+		return m, nil
+
 	case searchResultMsg:
 		m.searchingNow = false
 		if msg.err != nil {
@@ -758,6 +778,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "update":
 					m.status = "Проверка обновлений…"
 					return m, m.checkUpdateCmd(true)
+				case "update install":
+					if m.installingUpdate {
+						m.status = "Установка уже идёт…"
+						return m, nil
+					}
+					m.installingUpdate = true
+					m.status = "Скачивание обновления…"
+					return m, m.installUpdateCmd()
 				case "":
 					return m, nil
 				}
@@ -1437,6 +1465,47 @@ func (m Model) checkUpdateCmd(explicit bool) tea.Cmd {
 	}
 }
 
+// installUpdateCmd — tea.Cmd для скачивания и установки обновления.
+// Выполняет полный цикл: CheckLatest -> IsNewer -> AssetNameForPlatform ->
+// FindAsset -> DownloadBinary -> os.Executable/EvalSymlinks -> InstallBinary.
+// Любая ошибка на любом шаге возвращается через updateInstallMsg{err: ...}.
+func (m Model) installUpdateCmd() tea.Cmd {
+	ctx := m.ctx
+	return func() tea.Msg {
+		rel, err := update.CheckLatest(ctx, http.DefaultClient, 5*time.Second)
+		if err != nil {
+			return updateInstallMsg{err: fmt.Errorf("проверка обновлений: %w", err)}
+		}
+		if !update.IsNewer(m.version, rel.TagName) {
+			return updateInstallMsg{err: fmt.Errorf("уже установлена последняя версия")}
+		}
+		assetName, ok := update.AssetNameForPlatform()
+		if !ok {
+			return updateInstallMsg{err: fmt.Errorf("нет готового бинарника для этой платформы (GOOS=%s GOARCH=%s) — скачайте вручную: %s", runtime.GOOS, runtime.GOARCH, rel.HTMLURL)}
+		}
+		asset, ok := update.FindAsset(rel, assetName)
+		if !ok {
+			return updateInstallMsg{err: fmt.Errorf("ассет %q не найден в релизе %s — возможно, сборка для этой платформы не удалась; скачайте вручную: %s", assetName, rel.TagName, rel.HTMLURL)}
+		}
+		data, err := update.DownloadBinary(ctx, http.DefaultClient, asset.BrowserDownloadURL, 2*time.Minute)
+		if err != nil {
+			return updateInstallMsg{err: fmt.Errorf("скачивание бинарника: %w", err)}
+		}
+		execPath, err := os.Executable()
+		if err != nil {
+			return updateInstallMsg{err: fmt.Errorf("определение пути исполняемого файла: %w", err)}
+		}
+		execPath, err = filepath.EvalSymlinks(execPath)
+		if err != nil {
+			return updateInstallMsg{err: fmt.Errorf("разрешение симлинков исполняемого файла: %w", err)}
+		}
+		if err := update.InstallBinary(data, execPath); err != nil {
+			return updateInstallMsg{err: fmt.Errorf("установка бинарника: %w", err)}
+		}
+		return updateInstallMsg{version: rel.TagName, err: nil}
+	}
+}
+
 // currentChatTitle — название чата, открытого в msgPane, для заголовка панели.
 // m.displayedChat всегда либо 0 (ничего не открыто), либо id чата из ТЕКУЩЕГО
 // m.chats — переключение папки сбрасывает displayedChat в 0 ДО того, как можно
@@ -1515,6 +1584,7 @@ func (m Model) helpScreen() string {
 		sectionStyle.Render("КОМАНДНАЯ СТРОКА (:)"),
 		keyLine(":q", "выход (тоже :quit)"),
 		keyLine(":update", "проверить обновления вручную"),
+		keyLine(":update install", "скачать и установить доступное обновление"),
 		"",
 		sectionStyle.Render("КОНФИГУРАЦИЯ"),
 		descStyle.Render("  <config dir>/telecli/ — config.toml (доступ к Telegram), keybindings.toml"),

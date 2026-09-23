@@ -13,8 +13,15 @@ import (
 // Release — минимальный набор полей ответа GitHub API
 // GET /repos/{owner}/{repo}/releases/latest, которые нужны telecli.
 type Release struct {
-	TagName string `json:"tag_name"`
-	HTMLURL string `json:"html_url"`
+	TagName string  `json:"tag_name"`
+	HTMLURL string  `json:"html_url"`
+	Assets  []Asset `json:"assets"`
+}
+
+// Asset — ассет релиза GitHub (файл для скачивания).
+type Asset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
 // apiURLOverride — для тестов, тот же паттерн, что SetKeyBindingsPathForTest/
