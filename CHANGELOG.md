@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/zeroscrypt/telecli/compare/v1.1.0...v1.1.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* install.sh/README — chmod 755 instead of chmod +x ([314ef67](https://github.com/zeroscrypt/telecli/commit/314ef67a98bc8d574a35628a7ee0fa52190726c4))
+
 ## [1.1.0](https://github.com/zeroscrypt/telecli/compare/v1.0.0...v1.1.0) (2026-09-23)
 
 
