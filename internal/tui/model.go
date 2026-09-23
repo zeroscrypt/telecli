@@ -72,8 +72,8 @@ const (
 	modeCommand
 	modeFile
 	modeSearch
-	// modeHelp — полноэкранный оверлей "о программе" (хоткей ShowHelp,
-	// по умолчанию "t"), см. View/helpScreen. Из Normal, закрывается назад в
+	// modeHelp — полноэкранный оверлей-справка (хоткей ShowHelp,
+	// по умолчанию "h"), см. View/helpScreen. Из Normal, закрывается назад в
 	// Normal по Esc или повторному ShowHelp — тот же принцип toggle, что и у
 	// остальных модальных оверлеев (modeCommand/modeSearch).
 	modeHelp
@@ -826,11 +826,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					if _, ok := Themes[themeName]; !ok {
-						var names []string
-						for n := range Themes {
-							names = append(names, n)
-						}
-						m.status = fmt.Sprintf("Неизвестная тема: %s. Доступные: %s", themeName, strings.Join(names, ", "))
+						m.status = fmt.Sprintf("Неизвестная тема: %s. Доступные: %s", themeName, strings.Join(themeNames(), ", "))
 						return m, nil
 					}
 					m.theme = Themes[themeName]
@@ -1611,33 +1607,57 @@ func (m Model) helpScreen() string {
 		"Vim-модальный интерфейс: три панели (папки, чаты, сообщения), навигация с клавиатуры.",
 		"",
 		sectionStyle.Render("НАВИГАЦИЯ (Normal)"),
-		keyLine("tab", "переключить панель"),
-		keyLine("j/k/↑↓", "курсор вверх/вниз"),
-		keyLine("←/→", "фокус влево/вправо"),
-		keyLine("1/2/3", "прямой переход к панели"),
+		keyLine("tab", "переключить панель (циклически)"),
+		keyLine("j/k/↑↓", "курсор вверх/вниз в активной панели"),
+		keyLine("←/→", "фокус влево/вправо (без зацикливания)"),
+		keyLine("1/2/3", "прямой переход к панели: папки/чаты/сообщения"),
 		keyLine("enter", "открыть чат / выбрать папку"),
-		keyLine("i", "ввод сообщения"),
+		keyLine("i", "ввод сообщения (нужен выбранный чат)"),
 		keyLine(":", "командная строка"),
 		keyLine("/", "поиск чатов/каналов/контактов"),
-		keyLine("ctrl+f", "отправить файл"),
-		keyLine("d", "покинуть/удалить чат под курсором (с подтверждением)"),
-		keyLine("t", "это окно"),
+		keyLine("ctrl+f", "отправить файл (ввод пути)"),
+		keyLine("d", "покинуть/удалить чат под курсором — далее y/Y подтвердить, любая другая клавиша/esc отменить"),
+		keyLine("h", "это окно (то же самое, что :help)"),
+		keyLine("t", "экран «о программе» — логотип TELECLi, версия, ссылка, автор"),
 		keyLine("q", "выход"),
+		keyLine("ctrl+c", "аварийный выход из любого режима (работает всегда, не переопределяется)"),
 		"",
 		sectionStyle.Render("ВВОД СООБЩЕНИЯ (Insert)"),
 		keyLine("enter", "отправить"),
-		keyLine("ctrl+j", "перенос строки (поле растёт вниз)"),
+		keyLine("ctrl+j", "перенос строки (поле растёт вниз; не Shift+Enter — см. README, там же почему)"),
 		keyLine("esc", "отмена, назад в Normal"),
 		"",
 		sectionStyle.Render("КОМАНДНАЯ СТРОКА (:)"),
 		keyLine(":q", "выход (тоже :quit)"),
-		keyLine(":help", "показать это окно"),
-		keyLine(":update", "проверить обновления вручную"),
-		keyLine(":update install", "скачать и установить доступное обновление"),
+		keyLine(":help", "показать это окно (то же самое, что h)"),
+		keyLine(":theme <имя>", "сменить тему интерфейса на текущий запуск"),
+		"",
+		descStyle.Render("  Доступные темы: " + strings.Join(themeNames(), ", ") + " (сейчас: " + m.theme.Name + ")."),
+		descStyle.Render("  :theme меняет только текущую сессию — не пишет в settings.toml. Чтобы тема"),
+		descStyle.Render("  осталась по умолчанию при следующем запуске, впишите theme = \"имя\" в файл сами."),
+		"",
+		sectionStyle.Render("ОБНОВЛЕНИЯ"),
+		descStyle.Render("  При старте telecli тихо проверяет в фоне, нет ли версии новее (GitHub"),
+		descStyle.Render("  Releases этого репозитория) — если есть, справа в нижней строке появится"),
+		descStyle.Render("  vX.Y.Z → vX.Y.Z+1 (:update). Молчание не значит ошибку — сеть могла быть"),
+		descStyle.Render("  недоступна, фоновая проверка её никак не показывает (в отличие от явной ниже)."),
+		"",
+		keyLine(":update", "проверить явно — статус покажет: доступна версия / уже последняя / ошибка сети"),
+		keyLine(":update install", "скачать подходящий бинарник и заменить им текущий файл на диске"),
+		"",
+		descStyle.Render("  :update install сама сначала делает то же, что :update — новую версию не"),
+		descStyle.Render("  нужно проверять отдельно. Замена атомарна: если скачивание оборвётся на"),
+		descStyle.Render("  середине, рабочий файл останется нетронутым, ошибка — в статусе. Файл на"),
+		descStyle.Render("  диске меняется СРАЗУ, но уже запущенный процесс работает со старым кодом в"),
+		descStyle.Render("  памяти — новая версия начнёт действовать после выхода (q/ctrl+c) и"),
+		descStyle.Render("  повторного запуска telecli."),
+		descStyle.Render("  Готовые бинарники — только для macOS arm64 и Linux amd64. На других"),
+		descStyle.Render("  платформах :update install покажет ошибку со ссылкой на релиз — там"),
+		descStyle.Render("  обновляются пересборкой из исходников (см. README, Option C)."),
 		"",
 		sectionStyle.Render("КОНФИГУРАЦИЯ"),
 		descStyle.Render("  <config dir>/telecli/ — config.toml (доступ к Telegram), keybindings.toml"),
-		descStyle.Render("  (горячие клавиши), settings.toml (опции интерфейса)."),
+		descStyle.Render("  (горячие клавиши), settings.toml (тема, выравнивание своих сообщений)."),
 		"",
 		descStyle.Render("  Лицензия MIT · github.com/zeroscrypt/telecli"),
 	}
@@ -1757,7 +1777,7 @@ func (m Model) bottomLine() string {
 			{"j/k/↑↓", "курсор"},
 			{"i", "ввод"},
 			{":", "команда"},
-			{"t", "справка"},
+			{"h", "справка"},
 			{"q", "выход"},
 		}
 		switch m.focus {

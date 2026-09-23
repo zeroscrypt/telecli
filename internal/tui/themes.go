@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"sort"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Theme определяет цветовую тему приложения.
 type Theme struct {
@@ -33,6 +37,19 @@ var Themes = map[string]Theme{
 
 // DefaultThemeName — имя темы по умолчанию.
 const DefaultThemeName = "neon"
+
+// themeNames возвращает имена зарегистрированных тем в стабильном
+// (алфавитном) порядке — map-итерация недетерминирована, а список
+// показывается человеку (helpScreen, ошибка неизвестной темы в :theme) и не
+// должен скакать между запусками/рендерами.
+func themeNames() []string {
+	names := make([]string, 0, len(Themes))
+	for n := range Themes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
 
 // neonTheme — текущая палитра приложения (как в styles.go).
 func neonTheme() Theme {

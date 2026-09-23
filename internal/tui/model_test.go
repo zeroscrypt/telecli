@@ -620,10 +620,10 @@ func TestModeCommandHelpOpensHelpScreen(t *testing.T) {
 		t.Fatalf("expected modeHelp after :help, got %v", m.mode)
 	}
 
-	// 't' key (ShowHelp) from help screen returns to Normal (same toggle behavior)
-	m, _ = updateModel(m, keyRune('t'))
+	// 'h' key (ShowHelp) from help screen returns to Normal (same toggle behavior)
+	m, _ = updateModel(m, keyRune('h'))
 	if m.mode != modeNormal {
-		t.Fatalf("expected modeNormal after 't' from help screen, got %v", m.mode)
+		t.Fatalf("expected modeNormal after 'h' from help screen, got %v", m.mode)
 	}
 }
 

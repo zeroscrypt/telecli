@@ -44,7 +44,7 @@ func newKeyMap(cfg config.KeyBindings) KeyMap {
 		Quit:         key.NewBinding(key.WithKeys(cfg.Quit...), key.WithHelp("q", "выход")),
 		SendFile:     key.NewBinding(key.WithKeys(cfg.SendFile...), key.WithHelp("ctrl+f", "файл")),
 		Search:       key.NewBinding(key.WithKeys(cfg.Search...), key.WithHelp("/", "поиск")),
-		ShowHelp:     key.NewBinding(key.WithKeys(cfg.ShowHelp...), key.WithHelp("t", "о программе")),
+		ShowHelp:     key.NewBinding(key.WithKeys(cfg.ShowHelp...), key.WithHelp("h", "справка")),
 		DeleteChat:   key.NewBinding(key.WithKeys(cfg.DeleteChat...), key.WithHelp("d", "удалить/покинуть чат")),
 	}
 }

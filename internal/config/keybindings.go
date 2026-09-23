@@ -47,7 +47,7 @@ func DefaultKeyBindings() KeyBindings {
 		Quit:         []string{"q", "ctrl+c"},
 		SendFile:     []string{"ctrl+f"},
 		Search:       []string{"/"},
-		ShowHelp:     []string{"t"},
+		ShowHelp:     []string{"h"},
 		DeleteChat:   []string{"d"},
 	}
 }
