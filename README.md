@@ -13,13 +13,42 @@ A terminal Telegram client with vim-like modal input. Written in Go, protocol co
 
 ## Installation
 
-### Dependencies
+### Quick install (prebuilt binary)
+
+Every [release](https://github.com/zeroscrypt/telecli/releases) has statically linked binaries
+attached — no TDLib install, no compiler needed:
+
+```sh
+# macOS (Apple Silicon)
+curl -LO https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-darwin-arm64
+chmod +x telecli-darwin-arm64
+./telecli-darwin-arm64
+
+# Linux (x86_64)
+curl -LO https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-linux-amd64
+chmod +x telecli-linux-amd64
+./telecli-linux-amd64
+```
+
+macOS will refuse to run the downloaded binary the first time (Gatekeeper, unsigned) — either
+right-click it and choose "Open" once, or run `xattr -d com.apple.quarantine ./telecli-darwin-arm64`.
+
+Other platforms (Windows, Linux arm64, macOS Intel) don't have prebuilt binaries yet — build from
+source instead, see below.
+
+Then skip straight to ["Get Telegram application credentials"](#get-telegram-application-credentials).
+
+### Build from source
+
+Needed for platforms without a prebuilt binary, or if you want to build from a specific commit.
+
+#### Dependencies
 
 - Go 1.25 or newer.
 - TDLib built from source (see below — **not from a package manager**, this matters).
 - Telegram application credentials (`api_id`/`api_hash`) — register for free at [my.telegram.org](https://my.telegram.org).
 
-### 1. Build TDLib
+#### 1. Build TDLib
 
 Packaged versions of TDLib (e.g. `brew install tdlib` on macOS) are at best several years out of
 date, and Telegram rejects login with such a version with `UPDATE_APP_TO_LOGIN`. Build from current
@@ -59,7 +88,7 @@ cmake --install . --prefix $HOME/.local/tdlib
 Needs ≥4 GB RAM during compilation. The `.pc` file likely also needs the `-rpath` patch — check in
 practice if you get a library-loading error at runtime.
 
-### 2. Build telecli
+#### 2. Build telecli
 
 ```sh
 git clone https://github.com/zeroscrypt/telecli.git
@@ -71,7 +100,7 @@ If an old packaged TDLib is also installed on the machine, make sure
 `$HOME/.local/tdlib/lib/pkgconfig` comes first in `PKG_CONFIG_PATH`, otherwise you might accidentally
 build against the old version.
 
-### 3. Get Telegram application credentials
+### Get Telegram application credentials
 
 Register an application at [my.telegram.org](https://my.telegram.org) → "API development tools" →
 get `api_id` and `api_hash`. Pass them once via environment variables on first run — they'll be
@@ -136,13 +165,14 @@ On launch, `telecli` silently checks in the background whether a newer version i
 repository's GitHub Releases) — if found, `vX.Y.Z → vX.Y.Z+1 (:update)` appears on the right side of
 the bottom line. To check manually and see the result explicitly, use the `:update` command in
 Normal mode (`:` → `update` → `Enter`). The command only shows that a newer version is available —
-there's no automatic binary replacement yet, update by rebuilding (see "Installation" above) or
-downloading the new release from the Releases page.
+there's no automatic binary replacement yet, update by downloading the new release from the
+[Releases page](https://github.com/zeroscrypt/telecli/releases) (see "Quick install" above) or
+rebuilding from source.
 
 ## Releases
 
 Versions are assigned automatically by [Release Please](https://github.com/googleapis/release-please)
-based on [Conventional Commits](https://www.conventionalcommits.org/) in the `main` branch history:
+based on [Conventional Commits](https://www.conventionalcommits.org/) in this branch's history:
 
 | Commit prefix | Result |
 |---|---|
@@ -150,10 +180,10 @@ based on [Conventional Commits](https://www.conventionalcommits.org/) in the `ma
 | `feat: ...` | minor (0.1.0 → 0.2.0) |
 | `feat!: ...` / `fix!: ...` (or a `BREAKING CHANGE:` footer) | major (0.1.0 → 1.0.0) |
 
-On every commit to `main`, Release Please updates an open Release PR with the accumulated
-`CHANGELOG.md` and the next version; merging that PR creates the git tag and GitHub Release itself.
-Official binaries built with `-ldflags "-X main.version=vX.Y.Z"` are published to the release
-separately, not automatically by this workflow.
+On every push here, Release Please updates an open Release PR with the accumulated `CHANGELOG.md`
+and the next version; merging that PR creates the git tag and GitHub Release. Publishing that
+release automatically triggers a second workflow that builds the binaries (statically linked, see
+"Quick install" above) and attaches them to it — no manual step.
 
 ## License
 

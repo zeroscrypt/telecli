@@ -13,13 +13,43 @@
 
 ## Установка
 
-### Зависимости
+### Быстрая установка (готовый бинарник)
+
+К каждому [релизу](https://github.com/zeroscrypt/telecli/releases) прикреплены статически
+слинкованные бинарники — TDLib ставить отдельно и ничего компилировать не нужно:
+
+```sh
+# macOS (Apple Silicon)
+curl -LO https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-darwin-arm64
+chmod +x telecli-darwin-arm64
+./telecli-darwin-arm64
+
+# Linux (x86_64)
+curl -LO https://github.com/zeroscrypt/telecli/releases/latest/download/telecli-linux-amd64
+chmod +x telecli-linux-amd64
+./telecli-linux-amd64
+```
+
+macOS при первом запуске откажется открывать скачанный бинарник (Gatekeeper, он не подписан) —
+либо кликните по нему правой кнопкой и выберите «Открыть» один раз, либо выполните
+`xattr -d com.apple.quarantine ./telecli-darwin-arm64`.
+
+Для остальных платформ (Windows, Linux arm64, macOS Intel) готовых бинарников пока нет — собирайте
+из исходников, см. ниже.
+
+Дальше сразу переходите к [«Получить данные приложения Telegram»](#получить-данные-приложения-telegram).
+
+### Сборка из исходников
+
+Нужна для платформ без готового бинарника или если хотите собрать из конкретного коммита.
+
+#### Зависимости
 
 - Go 1.25 или новее.
 - Собранная из исходников TDLib (см. ниже — **не через пакетный менеджер**, это важно).
 - Данные приложения Telegram (`api_id`/`api_hash`) — бесплатно регистрируются на [my.telegram.org](https://my.telegram.org).
 
-### 1. Собрать TDLib
+#### 1. Собрать TDLib
 
 Пакетные версии TDLib (например, `brew install tdlib` на macOS) в лучшем случае устарели на несколько
 лет и Telegram отклоняет вход с такой версией ошибкой `UPDATE_APP_TO_LOGIN`. Собирайте из актуального
@@ -59,7 +89,7 @@ cmake --install . --prefix $HOME/.local/tdlib
 Нужно ≥4 ГБ RAM на этапе компиляции. `.pc`-файл, вероятно, тоже нуждается в `-rpath`-патче — сверьте
 по факту, если получите ошибку загрузки библиотеки при запуске.
 
-### 2. Собрать telecli
+#### 2. Собрать telecli
 
 ```sh
 git clone https://github.com/zeroscrypt/telecli.git
@@ -71,7 +101,7 @@ PKG_CONFIG_PATH="$HOME/.local/tdlib/lib/pkgconfig" go build -o telecli ./cmd/tel
 `$HOME/.local/tdlib/lib/pkgconfig` идёт первым в `PKG_CONFIG_PATH`, иначе можно случайно собраться со
 старой версией.
 
-### 3. Получить данные приложения Telegram
+### Получить данные приложения Telegram
 
 Зарегистрируйте приложение на [my.telegram.org](https://my.telegram.org) → «API development tools» →
 получите `api_id` и `api_hash`. Передайте их один раз через переменные окружения при первом запуске —
@@ -136,13 +166,14 @@ align_own_right = true    # прижимать свои сообщения к п
 репозитория) — при найденном обновлении справа в нижней строке появляется `vX.Y.Z → vX.Y.Z+1
 (:update)`. Проверить вручную и увидеть результат явно — команда `:update` в Normal-режиме
 (`:` → `update` → `Enter`). Сама команда только показывает, что доступно новее — автоматической
-замены бинарника пока нет, обновляйтесь пересборкой (см. «Установка» выше) или загрузкой нового
-релиза со страницы Releases.
+замены бинарника пока нет, обновляйтесь загрузкой нового релиза со страницы
+[Releases](https://github.com/zeroscrypt/telecli/releases) (см. «Быстрая установка» выше) или
+пересборкой из исходников.
 
 ## Релизы
 
 Версии присваиваются автоматически инструментом [Release Please](https://github.com/googleapis/release-please)
-по [Conventional Commits](https://www.conventionalcommits.org/) в истории коммитов ветки `main`:
+по [Conventional Commits](https://www.conventionalcommits.org/) в истории коммитов этой ветки:
 
 | Префикс коммита | Результат |
 |---|---|
@@ -150,10 +181,10 @@ align_own_right = true    # прижимать свои сообщения к п
 | `feat: ...` | minor (0.1.0 → 0.2.0) |
 | `feat!: ...` / `fix!: ...` (или футер `BREAKING CHANGE:`) | major (0.1.0 → 1.0.0) |
 
-При каждом коммите в `main` Release Please обновляет открытый Release PR с накопленным
-`CHANGELOG.md` и следующей версией; при мерже этого PR — сам создаёт git-тег и GitHub Release.
-Официальные бинарники с `-ldflags "-X main.version=vX.Y.Z"` публикуются к релизу отдельно, не
-автоматически этим workflow.
+При каждом пуше сюда Release Please обновляет открытый Release PR с накопленным `CHANGELOG.md` и
+следующей версией; при мерже этого PR создаётся git-тег и GitHub Release. Публикация релиза
+автоматически запускает второй workflow, который собирает бинарники (статическая линковка, см.
+«Быстрая установка» выше) и прикрепляет их к релизу — без ручного шага.
 
 ## Лицензия
 
