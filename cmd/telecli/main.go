@@ -10,6 +10,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"telecli/internal/auth"
@@ -212,6 +214,13 @@ func runTUI() error {
 	defer tuiCancel()
 
 	model := tui.New(client, tuiCtx, keys, settings, version)
+
+	// Настройка цветового профиля: если терминал поддерживает truecolor
+	// (COLORTERM=truecolor или 24bit), форсируем профиль в lipgloss.
+	// Это исправляет проблему, когда автоопределение не подхватывает
+	// поддержку truecolor в некоторых окружениях.
+	setupColorProfile()
+
 	// WithMouseCellMotion — без неё колесо мыши не долетает до приложения
 	// как tea.MouseMsg (bubbles/viewport уже умеет прокручивать по колесу
 	// «из коробки», MouseWheelEnabled=true по умолчанию — не хватало только
@@ -224,4 +233,47 @@ func runTUI() error {
 		return fmt.Errorf("TUI: %w", err)
 	}
 	return nil
+}
+
+// setupColorProfile настраивает цветовой профиль lipgloss на основе
+// переменных окружения. Если терминал декларирует поддержку truecolor
+// (COLORTERM=truecolor или COLORTERM=24bit), форсируем профиль TrueColor.
+// Не форсируем слепо для всех терминалов — если COLORTERM не установлен
+// или TERM не подразумевает truecolor, оставляем автоопределение
+// (корректная деградация до 256/16 цветов — ожидаемое поведение).
+func setupColorProfile() {
+	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
+	term := os.Getenv("TERM")
+
+	switch colorTerm {
+	case "truecolor", "24bit":
+		// Дополнительная проверка для screen/tmux: screen не поддерживает
+		// truecolor, tmux — поддерживает. TERM_PROGRAM=tmux указывает на tmux.
+		if strings.HasPrefix(term, "screen") && os.Getenv("TERM_PROGRAM") != "tmux" {
+			// screen без tmux — только ANSI256
+			return
+		}
+		lipgloss.SetColorProfile(termenv.TrueColor)
+	case "yes", "true":
+		// Явный запрос на цвет, но не truecolor — оставляем автоопределение
+		// (обычно даст ANSI256)
+		return
+	}
+
+	// Дополнительная эвристика: известные терминалы с встроенной поддержкой truecolor
+	// даже без COLORTERM (как в termenv).
+	trueColorTerms := []string{
+		"alacritty",
+		"contour",
+		"rio",
+		"wezterm",
+		"xterm-ghostty",
+		"xterm-kitty",
+	}
+	for _, t := range trueColorTerms {
+		if term == t {
+			lipgloss.SetColorProfile(termenv.TrueColor)
+			return
+		}
+	}
 }

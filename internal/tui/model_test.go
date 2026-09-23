@@ -113,6 +113,11 @@ func testModel(t *testing.T, chats []auth.Chat) Model {
 	return m
 }
 
+// defaultTheme возвращает тему по умолчанию для тестов.
+func defaultTheme() Theme {
+	return Themes[DefaultThemeName]
+}
+
 // typeText прогоняет каждый rune строки через Update отдельным KeyMsg — так
 // ввод идёт «по одному символу» и попадает в активное textinput-поле.
 func typeText(m Model, s string) Model {
@@ -354,7 +359,7 @@ func TestViewRendersPanes(t *testing.T) {
 	}
 
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: "текст", Date: 100}}
-	view, _ = renderMessages(m.messages, 0, false, 0)
+	view, _ = renderMessages(m.messages, 0, false, 0, defaultTheme())
 	if !strings.Contains(view, "текст") {
 		t.Errorf("renderMessages missing text:\n%s", view)
 	}
@@ -364,7 +369,7 @@ func TestRenderMessagesWrapsLongText(t *testing.T) {
 	longText := "одно два три четыре пять шесть семь восемь девять десять"
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 
-	got, _ := renderMessages(msgs, 20, false, 0)
+	got, _ := renderMessages(msgs, 20, false, 0, defaultTheme())
 	lines := strings.Split(got, "\n")
 	// Карточка: верхняя рамка + N строк тела + нижняя рамка; длинный текст не
 	// умещается в одну строку на 20 колонок, значит N >= 2, итого строк >= 4.
@@ -390,7 +395,7 @@ func TestRenderMessagesZeroWidthDoesNotWrap(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 
 	for _, width := range []int{0, -1} {
-		got, _ := renderMessages(msgs, width, false, 0)
+		got, _ := renderMessages(msgs, width, false, 0, defaultTheme())
 		// Перенос сохранён: строк такое же число, как и у текста без переноса.
 		if lines := strings.Split(got, "\n"); len(lines) != 2 {
 			t.Errorf("width=%d: expected single body line (no wrap), got %d lines:\n%s", width, len(lines), got)
@@ -408,7 +413,7 @@ func TestWindowSizeMsgRewrapsExistingMessages(t *testing.T) {
 	m.displayedChat = 111
 	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100, IsOutgoing: true}}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, _ := renderMessages(m.messages, contentWidth, false, 0)
+	content, _ := renderMessages(m.messages, contentWidth, false, 0, defaultTheme())
 	m.viewport.SetContent(content)
 
 	// Новый, более узкий размер терминала: лента перерисовывается под него.
@@ -424,7 +429,8 @@ func TestWindowSizeMsgRewrapsExistingMessages(t *testing.T) {
 // даёт один и тот же цвет (то, что в личном чате у собеседника цвет один и
 // тот же, получается само собой без отдельной проверки "это группа или нет").
 func TestNickColorDeterministicSameNameSameColor(t *testing.T) {
-	if got, want := nickColor("Ирина"), nickColor("Ирина"); got != want {
+	th := defaultTheme()
+	if got, want := nickColor("Ирина", th), nickColor("Ирина", th); got != want {
 		t.Fatalf("expected same nick color for the same name, got %v and %v", got, want)
 	}
 }
@@ -434,7 +440,8 @@ func TestNickColorDeterministicSameNameSameColor(t *testing.T) {
 // вручную сложением байт-кодов (208+152+… по модулю 4) и дают разные
 // значения (2 и 3).
 func TestNickIndexDistributesAcrossPalette(t *testing.T) {
-	gotIrina, gotIgor := nickIndex("Ирина"), nickIndex("Игорь")
+	th := defaultTheme()
+	gotIrina, gotIgor := nickIndex("Ирина", len(th.NickPalette)), nickIndex("Игорь", len(th.NickPalette))
 	if gotIrina == gotIgor {
 		t.Fatalf("expected different nick indices for different names, both got %d", gotIrina)
 	}
@@ -446,7 +453,7 @@ func TestNickIndexDistributesAcrossPalette(t *testing.T) {
 func TestRenderMessageCardTopLineContainsSenderName(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Ирина", Text: "привет", Date: 100}}
 
-	got, _ := renderMessages(msgs, 20, false, 0)
+	got, _ := renderMessages(msgs, 20, false, 0, defaultTheme())
 	first := strings.Split(got, "\n")[0]
 	if !strings.Contains(first, "Ирина") {
 		t.Errorf("top card line must contain sender name, got: %q", first)
@@ -458,7 +465,7 @@ func TestRenderMessageCardTopLineContainsSenderName(t *testing.T) {
 func TestRenderMessagesAlignOwnRightPadsOwnCardToRightEdge(t *testing.T) {
 	msgs := []auth.Message{{ID: 1, SenderName: "Вы", Text: "моё", Date: 100, IsOutgoing: true}}
 
-	got, _ := renderMessages(msgs, 60, true, 0)
+	got, _ := renderMessages(msgs, 60, true, 0, defaultTheme())
 	for _, line := range strings.Split(got, "\n") {
 		if line == "" {
 			continue
@@ -487,7 +494,7 @@ func TestRenderMessagesAlignOwnRightFalseNoRightPadding(t *testing.T) {
 		{ID: 2, SenderName: "Ирина", Text: "чужое", Date: 101},
 	}
 
-	got, _ := renderMessages(msgs, 60, false, 0)
+	got, _ := renderMessages(msgs, 60, false, 0, defaultTheme())
 	cards := strings.Split(got, "\n\n")
 	if len(cards) != 2 {
 		t.Fatalf("expected 2 cards, got %d:\n%s", len(cards), got)
@@ -536,7 +543,7 @@ func TestRenderMessagesAlignOwnRightNarrowWidthDoesNotOverflow(t *testing.T) {
 	for _, sender := range []string{"Вы", "Александра"} {
 		msgs := []auth.Message{{ID: 1, SenderName: sender, Text: "моё сообщение подлиннее", Date: 100, IsOutgoing: true}}
 		for width := 3; width <= 30; width++ {
-			got, _ := renderMessages(msgs, width, true, 0)
+			got, _ := renderMessages(msgs, width, true, 0, defaultTheme())
 			for _, line := range strings.Split(got, "\n") {
 				if line == "" {
 					continue
@@ -557,7 +564,7 @@ func TestRenderMessagesAlignOwnRightNarrowWidthDoesNotOverflow(t *testing.T) {
 // не гарантирует соблюдение инварианта ширины (осознанный, а не забытый предел).
 func TestRenderMessageCardNarrowWidthLineWidthsMatch(t *testing.T) {
 	for _, width := range []int{3, 4, 5, 6, 8} {
-		got := renderMessageCard(auth.Message{ID: 1, SenderName: "?", Text: "x", Date: 100}, width, false, false)
+		got := renderMessageCard(auth.Message{ID: 1, SenderName: "?", Text: "x", Date: 100}, width, false, false, defaultTheme())
 		for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
 			if line == "" {
 				continue
@@ -596,6 +603,81 @@ func TestModeCommandQuit(t *testing.T) {
 		if m.mode != modeNormal {
 			t.Errorf("expected modeNormal after :%s, got %v", cmdName, m.mode)
 		}
+	}
+}
+
+func TestModeCommandHelpOpensHelpScreen(t *testing.T) {
+	m := testModel(t, nil)
+
+	// :help from Normal mode opens help screen
+	m, _ = updateModel(m, keyRune(':'))
+	m = typeText(m, "help")
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf(":help must not return cmd, got %v", cmd)
+	}
+	if m.mode != modeHelp {
+		t.Fatalf("expected modeHelp after :help, got %v", m.mode)
+	}
+
+	// 't' key (ShowHelp) from help screen returns to Normal (same toggle behavior)
+	m, _ = updateModel(m, keyRune('t'))
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after 't' from help screen, got %v", m.mode)
+	}
+}
+
+func TestModeCommandThemeValidNameSwitchesTheme(t *testing.T) {
+	m := testModel(t, nil)
+	if m.theme.Name != DefaultThemeName {
+		t.Fatalf("expected default theme %q at start, got %q", DefaultThemeName, m.theme.Name)
+	}
+
+	m, _ = updateModel(m, keyRune(':'))
+	m = typeText(m, "theme yellow")
+	m, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf(":theme yellow must not return cmd, got %v", cmd)
+	}
+	if m.theme.Name != "yellow" {
+		t.Fatalf("expected theme %q after :theme yellow, got %q", "yellow", m.theme.Name)
+	}
+	if m.settings.Theme != "yellow" {
+		t.Fatalf("expected m.settings.Theme %q, got %q", "yellow", m.settings.Theme)
+	}
+	if !strings.Contains(m.status, "yellow") {
+		t.Errorf("expected status to mention new theme name, got %q", m.status)
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after :theme, got %v", m.mode)
+	}
+}
+
+func TestModeCommandThemeUnknownNameKeepsThemeAndShowsError(t *testing.T) {
+	m := testModel(t, nil)
+	originalTheme := m.theme.Name
+
+	m, _ = updateModel(m, keyRune(':'))
+	m = typeText(m, "theme doesnotexist")
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.theme.Name != originalTheme {
+		t.Fatalf("theme must not change on unknown name: got %q, want unchanged %q", m.theme.Name, originalTheme)
+	}
+	if !strings.Contains(m.status, "Неизвестная тема") {
+		t.Errorf("expected error status for unknown theme, got %q", m.status)
+	}
+}
+
+func TestModeCommandThemeNoArgShowsUsage(t *testing.T) {
+	m := testModel(t, nil)
+
+	m, _ = updateModel(m, keyRune(':'))
+	m = typeText(m, "theme")
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if !strings.Contains(m.status, ":theme") {
+		t.Errorf("expected usage hint mentioning :theme, got %q", m.status)
 	}
 }
 
@@ -1080,7 +1162,8 @@ func TestViewShowsModeIndicator(t *testing.T) {
 // стилизации, без парсинга ANSI-кодов из отрендеренной View() (в go test-среде
 // профиль цвета lipgloss может отличаться от интерактивного терминала).
 func TestMessageColorDiffersByOutgoing(t *testing.T) {
-	if messageColor(true) == messageColor(false) {
+	th := defaultTheme()
+	if messageColor(true, th) == messageColor(false, th) {
 		t.Fatal("expected different colors for own and other messages")
 	}
 }
@@ -1088,7 +1171,8 @@ func TestMessageColorDiffersByOutgoing(t *testing.T) {
 // Подсветка рамки реально меняет цвет только у панели в фокусе: у неактивной
 // цвет рамки не задан (NoColor), у активной — акцентный.
 func TestPaneBorderStyleFocusedChangesBorderColor(t *testing.T) {
-	if paneBorderStyle(true).GetBorderTopForeground() == paneBorderStyle(false).GetBorderTopForeground() {
+	th := defaultTheme()
+	if paneBorderStyle(true, th, 0).GetBorderTopForeground() == paneBorderStyle(false, th, 0).GetBorderTopForeground() {
 		t.Fatal("expected focused pane border color to differ from unfocused")
 	}
 }
@@ -1099,10 +1183,11 @@ func TestPaneBorderStyleFocusedChangesBorderColor(t *testing.T) {
 // GetVerticalFrameSize() у фокусированной и нефокусированной рамки равны — если
 // в будущем рамка сменится на стиль с другой толщиной, этот тест упадёт.
 func TestActiveAndInactiveBorderFrameSizesEqual(t *testing.T) {
-	if got, want := paneBorderStyle(true).GetHorizontalFrameSize(), paneBorderStyle(false).GetHorizontalFrameSize(); got != want {
+	th := defaultTheme()
+	if got, want := paneBorderStyle(true, th, 0).GetHorizontalFrameSize(), paneBorderStyle(false, th, 0).GetHorizontalFrameSize(); got != want {
 		t.Errorf("horizontal frame: focused %d != unfocused %d", got, want)
 	}
-	if got, want := paneBorderStyle(true).GetVerticalFrameSize(), paneBorderStyle(false).GetVerticalFrameSize(); got != want {
+	if got, want := paneBorderStyle(true, th, 0).GetVerticalFrameSize(), paneBorderStyle(false, th, 0).GetVerticalFrameSize(); got != want {
 		t.Errorf("vertical frame: focused %d != unfocused %d", got, want)
 	}
 }
@@ -1115,7 +1200,8 @@ func TestActiveAndInactiveBorderFrameSizesEqual(t *testing.T) {
 // или несколько последовательностей.
 func chatSelectionColorANSI(t *testing.T) string {
 	t.Helper()
-	ref := lipgloss.NewStyle().Background(chatSelectionColor).Foreground(pillTextColor).Render("x")
+	th := defaultTheme()
+	ref := lipgloss.NewStyle().Background(th.ChatSelectionColor).Foreground(pillTextColor).Render("x")
 	return ref[:strings.Index(ref, "x")]
 }
 
@@ -1197,10 +1283,11 @@ func TestSpaceOutRunesTruncatesWithEllipsis(t *testing.T) {
 
 // Заголовок панели начинается с номера-хоткея в квадратных скобках.
 func TestPaneTitleShowsNumberPrefix(t *testing.T) {
-	if s := paneTitle(20, 1, "Папки", true); !strings.Contains(s, "[1]") {
+	th := defaultTheme()
+	if s := paneTitle(20, 1, "Папки", true, th); !strings.Contains(s, "[1]") {
 		t.Errorf("paneTitle(20, 1, 'Папки', true) must contain '[1]', got: %q", s)
 	}
-	if s := paneTitle(20, 2, "Чаты", false); !strings.Contains(s, "[2]") {
+	if s := paneTitle(20, 2, "Чаты", false, th); !strings.Contains(s, "[2]") {
 		t.Errorf("paneTitle(20, 2, 'Чаты', false) must contain '[2]', got: %q", s)
 	}
 }
@@ -1208,7 +1295,8 @@ func TestPaneTitleShowsNumberPrefix(t *testing.T) {
 // Название в заголовке приводится к капсу с разрядкой — исходные строчные
 // буквы в рендере не остаются.
 func TestPaneTitleUppercasesAndSpacesName(t *testing.T) {
-	got := paneTitle(30, 1, "чаты", true)
+	th := defaultTheme()
+	got := paneTitle(30, 1, "чаты", true, th)
 	if !strings.Contains(got, "Ч А Т Ы") {
 		t.Errorf("paneTitle(30, 1, 'чаты', true) must contain 'Ч А Т Ы', got: %q", got)
 	}
@@ -1391,7 +1479,7 @@ func TestWaitForMessageUpdateDoesNotJumpToBottomWhileScrolledUp(t *testing.T) {
 		{ID: 2, Text: longText, SenderName: "Собеседник", Date: 101},
 	}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0)
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme())
 	m.viewport.SetContent(content)
 	m.viewport.SetYOffset(0) // прокрутили наверх, читаем историю
 	if m.viewport.AtBottom() {
@@ -1415,7 +1503,7 @@ func TestWaitForMessageUpdateStillJumpsToBottomWhenAlreadyThere(t *testing.T) {
 	m.displayedChat = 111
 	m.messages = []auth.Message{{ID: 1, Text: "первое", SenderName: "Вы", Date: 100}}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0)
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme())
 	m.viewport.SetContent(content)
 	m.viewport.GotoBottom()
 
@@ -2252,9 +2340,9 @@ func TestPaneTitleWidthMatchesPaneWidth(t *testing.T) {
 		title string
 		pane  string
 	}{
-		{"folders", paneTitle(foldersPaneW, 1, "Папки", m.focus == focusFolders), m.foldersPane()},
-		{"chats", paneTitle(chatsPaneW, 2, "Чаты", m.focus == focusChats), m.chatPane()},
-		{"messages", paneTitle(m.viewport.Width, 3, m.currentChatTitle(), m.focus == focusMessages), m.msgPane()},
+		{"folders", paneTitle(foldersPaneW, 1, "Папки", m.focus == focusFolders, m.theme), m.foldersPane()},
+		{"chats", paneTitle(chatsPaneW, 2, "Чаты", m.focus == focusChats, m.theme), m.chatPane()},
+		{"messages", paneTitle(m.viewport.Width, 3, m.currentChatTitle(), m.focus == focusMessages, m.theme), m.msgPane()},
 	}
 	for _, c := range columns {
 		titleW := lipgloss.Width(strings.SplitN(c.title, "\n", 2)[0])
@@ -2813,7 +2901,7 @@ func TestMessageCursorSelectedCardUsesDoubleBorder(t *testing.T) {
 		{ID: 3, SenderName: "В", Text: "третье", Date: 102},
 	}
 
-	content, _ := renderMessages(msgs, 60, false, 1)
+	content, _ := renderMessages(msgs, 60, false, 1, defaultTheme())
 	cards := strings.Split(content, "\n\n")
 	if len(cards) != 3 {
 		t.Fatalf("expected 3 cards, got %d:\n%s", len(cards), content)
@@ -2848,7 +2936,7 @@ func TestRenderMessagesLineOffsetsMatchActualLines(t *testing.T) {
 		{ID: 3, SenderName: "Вы", Text: "ещё одно", Date: 102},
 	}
 
-	content, offsets := renderMessages(msgs, 60, false, 1)
+	content, offsets := renderMessages(msgs, 60, false, 1, defaultTheme())
 	lines := strings.Split(content, "\n")
 	if len(offsets) != len(msgs) {
 		t.Fatalf("expected %d offsets, got %d", len(msgs), len(offsets))
@@ -2880,7 +2968,7 @@ func TestRerenderScrollsToCursorWhenAboveView(t *testing.T) {
 		{ID: 4, SenderName: "А", Text: "сообщение четыре", Date: 103},
 	}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0)
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, 0, defaultTheme())
 	m.viewport.SetContent(content)
 	m.viewport.GotoBottom()
 	if m.viewport.YOffset == 0 {
@@ -2910,7 +2998,7 @@ func TestRerenderScrollsToCursorWhenBelowView(t *testing.T) {
 		{ID: 4, SenderName: "А", Text: strings.Repeat("длинный текст ", 8), Date: 103},
 	}
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, len(m.messages)-1)
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, len(m.messages)-1, defaultTheme())
 	m.viewport.SetContent(content)
 	m.viewport.SetYOffset(0)
 	if m.viewport.AtBottom() {

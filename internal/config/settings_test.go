@@ -48,6 +48,20 @@ func TestLoadSettingsPartialOverride(t *testing.T) {
 	require.Equal(t, want, settings)
 }
 
+func TestLoadSettingsThemeOverride(t *testing.T) {
+	_, cleanup := setupSettingsTest(t)
+	defer cleanup()
+
+	writeSettingsFile(t, "theme = \"yellow\"")
+
+	settings, err := LoadSettings()
+	require.NoError(t, err)
+
+	want := DefaultSettings()
+	want.Theme = "yellow"
+	require.Equal(t, want, settings)
+}
+
 func TestLoadSettingsAlignOwnRightExplicitFalse(t *testing.T) {
 	_, cleanup := setupSettingsTest(t)
 	defer cleanup()

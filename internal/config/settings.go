@@ -14,11 +14,15 @@ import (
 // сюда добавляются новые поля по мере появления новых настраиваемых опций,
 // не создавая для каждой новый файл.
 type Settings struct {
-	AlignOwnRight bool `toml:"-"` // выставляется в LoadSettings, не напрямую из TOML (см. ниже)
+	AlignOwnRight bool   `toml:"-"` // выставляется в LoadSettings, не напрямую из TOML (см. ниже)
+	Theme         string `toml:"theme"`
 }
 
 func DefaultSettings() Settings {
-	return Settings{AlignOwnRight: true}
+	return Settings{
+		AlignOwnRight: true,
+		Theme:         "neon",
+	}
 }
 
 // settingsPathOverride — отдельный override от fallbackPathOverride (секреты) и
@@ -50,7 +54,8 @@ func settingsPath() (string, error) {
 // булева — false, неотличимо от "явно выключено в файле", поэтому парсинг идёт
 // через *bool, а наружу отдаётся обычный bool (см. LoadSettings).
 type settingsFile struct {
-	AlignOwnRight *bool `toml:"align_own_right"`
+	AlignOwnRight *bool  `toml:"align_own_right"`
+	Theme         string `toml:"theme"`
 }
 
 // LoadSettings читает settings.toml и мержит непустые поля поверх дефолтов.
@@ -81,6 +86,9 @@ func LoadSettings() (Settings, error) {
 
 	if fileSettings.AlignOwnRight != nil {
 		settings.AlignOwnRight = *fileSettings.AlignOwnRight
+	}
+	if fileSettings.Theme != "" {
+		settings.Theme = fileSettings.Theme
 	}
 	return settings, nil
 }

@@ -265,6 +265,7 @@ type Model struct {
 	mode         appMode
 	keys         KeyMap
 	settings     config.Settings
+	theme        Theme
 	composeInput textarea.Model
 	commandInput textinput.Model
 	fileInput    textinput.Model
@@ -299,7 +300,11 @@ func New(client auth.TDClientInterface, ctx context.Context, keys config.KeyBind
 	// низ последней карточки обрезался. GetVerticalBorderSize()/паддинг
 	// одинаковы у focused/unfocused (см. paneBorderStyle) — цвет рамки здесь
 	// не важен, msgPane() всё равно переустановит его перед каждым View().
-	vp.Style = paneBorderStyle(false)
+	theme := Themes[settings.Theme]
+	if theme.Name == "" {
+		theme = Themes[DefaultThemeName]
+	}
+	vp.Style = paneBorderStyle(false, theme, 3)
 
 	commandInput := textinput.New()
 	// ":" — фиксированный по вим-конвенции признак командной строки (см.
@@ -324,6 +329,11 @@ func New(client auth.TDClientInterface, ctx context.Context, keys config.KeyBind
 	// чтобы KeyMap компонента отражал реальное поведение.
 	composeInput.KeyMap.InsertNewline.SetKeys("ctrl+j")
 
+	th := Themes[settings.Theme]
+	if th.Name == "" {
+		th = Themes[DefaultThemeName]
+	}
+
 	return Model{
 		client:       client,
 		ctx:          ctx,
@@ -331,6 +341,7 @@ func New(client auth.TDClientInterface, ctx context.Context, keys config.KeyBind
 		viewport:     vp,
 		keys:         newKeyMap(keys),
 		settings:     settings,
+		theme:        th,
 		composeInput: composeInput,
 		commandInput: commandInput,
 		fileInput:    fileInput,
@@ -373,6 +384,18 @@ func (m *Model) applyLayout() {
 	// (ширина панели сообщений минус рамка карточки), не во весь экран.
 	composeInnerW := max(0, m.viewport.Width-composeCardStyle().GetHorizontalBorderSize())
 	m.composeInput.SetWidth(composeInnerW)
+}
+
+// toggleHelp переключает режим modeHelp <-> modeNormal. Вызывается
+// и по хоткею ShowHelp (клавиша 't' в Normal), и по команде :help
+// в командной строке — общая логика для избежания дублирования.
+func (m *Model) toggleHelp() {
+	if m.mode == modeHelp {
+		m.mode = modeNormal
+	} else {
+		m.mode = modeHelp
+	}
+	m.applyLayout()
 }
 
 // composeCardHeight — полная высота карточки черновика вместе с рамкой
@@ -433,7 +456,7 @@ func (m *Model) syncComposeHeight() {
 // трогаем (не дёргаем прокрутку зря).
 func (m *Model) rerenderMessagesAndScrollToCursor() {
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor)
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
 	m.viewport.SetContent(content)
 	if m.messageCursor < 0 || m.messageCursor >= len(offsets) {
 		return
@@ -486,7 +509,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// новую ширину (позицию прокрутки не трогаем, это вне задачи).
 		if len(m.messages) > 0 {
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
 			m.viewport.SetContent(content)
 		}
 		return m, nil
@@ -531,7 +554,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = msg.messages
 		m.messageCursor = max(0, len(m.messages)-1) // курсор всегда синхронизирован с последним сообщением (см. п.5)
 		contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-		content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor)
+		content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
 		m.viewport.SetContent(content)
 		m.viewport.GotoBottom()
 		return m, nil
@@ -555,7 +578,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, msg.message)
 			m.messageCursor = max(0, len(m.messages)-1)
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
 			m.viewport.SetContent(content)
 			m.viewport.GotoBottom()
 		}
@@ -579,7 +602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, msg.message)
 			m.messageCursor = max(0, len(m.messages)-1)
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
 			m.viewport.SetContent(content)
 			m.viewport.GotoBottom()
 		}
@@ -636,7 +659,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, msg.message)
 			m.messageCursor = max(0, len(m.messages)-1)
 			contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
-			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor)
+			content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme)
 			m.viewport.SetContent(content)
 			if wasAtBottom {
 				m.viewport.GotoBottom()
@@ -786,7 +809,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.installingUpdate = true
 					m.status = "Скачивание обновления…"
 					return m, m.installUpdateCmd()
+				case "help":
+					m.toggleHelp()
+					return m, nil
+				case "theme":
+					m.status = "Укажите имя темы: :theme <имя>"
+					return m, nil
 				case "":
+					return m, nil
+				}
+				// :theme <name> — парсим аргумент команды
+				if strings.HasPrefix(cmdText, "theme ") {
+					themeName := strings.TrimSpace(strings.TrimPrefix(cmdText, "theme"))
+					if themeName == "" {
+						m.status = "Укажите имя темы: :theme <имя>"
+						return m, nil
+					}
+					if _, ok := Themes[themeName]; !ok {
+						var names []string
+						for n := range Themes {
+							names = append(names, n)
+						}
+						m.status = fmt.Sprintf("Неизвестная тема: %s. Доступные: %s", themeName, strings.Join(names, ", "))
+						return m, nil
+					}
+					m.theme = Themes[themeName]
+					m.settings.Theme = themeName
+					m.status = fmt.Sprintf("Тема изменена на: %s (до перезапуска; чтобы сохранить — впишите theme = %q в settings.toml)", themeName, themeName)
 					return m, nil
 				}
 				m.status = fmt.Sprintf("Неизвестная команда: %s", cmdText)
@@ -1001,8 +1050,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if key.Matches(msg, m.keys.ShowHelp) {
-			m.mode = modeHelp
-			m.applyLayout()
+			m.toggleHelp()
 			return m, nil
 		}
 		// Удаление/покидание чата — работает только в обычном списке m.chats:
@@ -1534,9 +1582,9 @@ func (m Model) View() string {
 	fStart, fEnd := visibleWindow(len(m.folders)+1, m.folderCursor, m.listContentRows())
 	cStart, cEnd := visibleWindow(m.chatListLen(), m.chatListCursor(), m.listContentRows())
 	titles := lipgloss.JoinHorizontal(lipgloss.Top,
-		paneTitle(foldersPaneW, 1, "Папки", m.focus == focusFolders, fStart > 0, fEnd < len(m.folders)+1),
-		paneTitle(chatsPaneW, 2, "Чаты", m.focus == focusChats, cStart > 0, cEnd < m.chatListLen()),
-		paneTitle(m.viewport.Width, 3, m.currentChatTitle(), m.focus == focusMessages, !m.viewport.AtTop(), !m.viewport.AtBottom()),
+		paneTitle(foldersPaneW, 1, "Папки", m.focus == focusFolders, m.theme, fStart > 0, fEnd < len(m.folders)+1),
+		paneTitle(chatsPaneW, 2, "Чаты", m.focus == focusChats, m.theme, cStart > 0, cEnd < m.chatListLen()),
+		paneTitle(m.viewport.Width, 3, m.currentChatTitle(), m.focus == focusMessages, m.theme, !m.viewport.AtTop(), !m.viewport.AtBottom()),
 	)
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, m.foldersPane(), m.chatPane(), m.msgPane())
 	body := titles + "\n" + panes + "\n" + m.bottomLine()
@@ -1552,10 +1600,10 @@ func (m Model) View() string {
 // после фикса прокрутки папок/чатов — контент никогда не должен рендерить
 // больше строк, чем реально помещается).
 func (m Model) helpScreen() string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(activeBorderColor)
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.ActiveBorderColor)
 	descStyle := lipgloss.NewStyle().Faint(true)
 	keyLine := func(key, desc string) string {
-		return "  " + hintKeyStyle.Render(runewidth.FillRight(key, 10)) + descStyle.Render(desc)
+		return "  " + hintKeyStyle(m.theme).Render(runewidth.FillRight(key, 10)) + descStyle.Render(desc)
 	}
 
 	lines := []string{
@@ -1583,6 +1631,7 @@ func (m Model) helpScreen() string {
 		"",
 		sectionStyle.Render("КОМАНДНАЯ СТРОКА (:)"),
 		keyLine(":q", "выход (тоже :quit)"),
+		keyLine(":help", "показать это окно"),
 		keyLine(":update", "проверить обновления вручную"),
 		keyLine(":update install", "скачать и установить доступное обновление"),
 		"",
@@ -1599,7 +1648,7 @@ func (m Model) helpScreen() string {
 	// закрыть оверлей.
 	footer := descStyle.Render("Esc / t — закрыть")
 
-	borderRows := paneBorderStyle(true).GetVerticalBorderSize()
+	borderRows := paneBorderStyle(true, m.theme, 0).GetVerticalBorderSize()
 	maxRows := max(0, m.height-borderRows-2*panePaddingV)
 	switch {
 	case maxRows <= 0:
@@ -1610,7 +1659,7 @@ func (m Model) helpScreen() string {
 		lines = append(lines, "", footer)
 	}
 
-	return paneBox(m.width, m.height, strings.Join(lines, "\n"), true)
+	return paneBox(m.width, m.height, strings.Join(lines, "\n"), true, m.theme, 0)
 }
 
 // chatListLen/chatListCursor — число элементов и позиция курсора в панели
@@ -1644,28 +1693,12 @@ func (m Model) chatListCursor() int {
 // Padding(0,1) вокруг 7 букв = 9 колонок; стало " T"+"ELECLi"+" " = те же
 // 9), так что весь расчёт padding в bottomLine() (lipgloss.Width(left))
 // остаётся верным без изменений там.
-func telecliLogo() string {
-	tPart := lipgloss.NewStyle().Background(activeBorderColor).Foreground(lipgloss.Color("#FFFFFF")).
+func telecliLogo(t Theme) string {
+	tPart := lipgloss.NewStyle().Background(t.ActiveBorderColor).Foreground(lipgloss.Color("#FFFFFF")).
 		Bold(true).Render(" T")
-	restPart := lipgloss.NewStyle().Background(activeBorderColor).Foreground(pillTextColor).
+	restPart := lipgloss.NewStyle().Background(t.ActiveBorderColor).Foreground(pillTextColor).
 		Bold(true).Render("ELECLi ")
 	return tPart + restPart
-}
-
-// hintKeyStyle — цвет названия клавиши в подсказках нижней строки (синим, тем
-// же акцентом, что рамка/логотип) — отдельно от тусклого текста описания,
-// чтобы клавиша не сливалась с объяснением, по правке человека.
-var hintKeyStyle = lipgloss.NewStyle().Foreground(activeBorderColor)
-
-// renderHint склеивает пары "клавиша"/"описание" через " — " (клавиша синим,
-// описание тусклым), записи между собой — через sep (тоже тусклым).
-func renderHint(sep string, pairs ...[2]string) string {
-	descStyle := lipgloss.NewStyle().Faint(true)
-	parts := make([]string, len(pairs))
-	for i, p := range pairs {
-		parts[i] = hintKeyStyle.Render(p[0]) + descStyle.Render(" — "+p[1])
-	}
-	return strings.Join(parts, descStyle.Render(sep))
 }
 
 // bottomLine — нижняя область зарезервированной высоты: командная строка,
@@ -1696,8 +1729,8 @@ func (m Model) bottomLine() string {
 		if m.sendingMsg {
 			hint = " (отправка…)"
 		}
-		logo := telecliLogo()
-		modeTag := lipgloss.NewStyle().Foreground(insertModeColor).Bold(true).Render(" INP")
+		logo := telecliLogo(m.theme)
+		modeTag := lipgloss.NewStyle().Foreground(m.theme.ChatSelectionColor).Bold(true).Render(" INP")
 		return logo + modeTag + lipgloss.NewStyle().Faint(true).Render(hint)
 	case modeConfirmDelete:
 		var prompt string
@@ -1714,8 +1747,8 @@ func (m Model) bottomLine() string {
 		if m.status != "" {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.status)
 		}
-		logo := telecliLogo()
-		modeTag := lipgloss.NewStyle().Foreground(activeBorderColor).Bold(true).Render(" NAV")
+		logo := telecliLogo(m.theme)
+		modeTag := lipgloss.NewStyle().Foreground(m.theme.ActiveBorderColor).Bold(true).Render(" NAV")
 		// Сначала — общие хоткеи (работают при любом фокусе), затем — контекстные
 		// для панели, которая сейчас в фокусе (по прямому запросу человека).
 		pairs := [][2]string{
@@ -1733,7 +1766,7 @@ func (m Model) bottomLine() string {
 		case focusMessages:
 			pairs = append(pairs, [2]string{"ctrl+f", "файл"})
 		}
-		hint := " " + renderHint(" · ", pairs...)
+		hint := " " + renderHint(" · ", m.theme, pairs...)
 		left := logo + modeTag + hint
 
 		versionText := m.version
@@ -1768,7 +1801,7 @@ func (m Model) bottomLine() string {
 // скользящее окно вокруг курсора (см. visibleWindow), тот же принцип, что
 // уже применён к messageCursor в focusMessages.
 func (m Model) listContentRows() int {
-	borderRows := paneBorderStyle(false).GetVerticalBorderSize()
+	borderRows := paneBorderStyle(false, m.theme, 0).GetVerticalBorderSize()
 	return max(0, m.paneRowHeight-borderRows-2*panePaddingV)
 }
 
@@ -1834,7 +1867,7 @@ func (m Model) foldersPane() string {
 		sb.WriteString(style.Width(contentW).Render(content))
 		sb.WriteString("\n")
 	}
-	return paneBox(foldersPaneW, m.paneRowHeight, strings.TrimRight(sb.String(), "\n"), m.focus == focusFolders)
+	return paneBox(foldersPaneW, m.paneRowHeight, strings.TrimRight(sb.String(), "\n"), m.focus == focusFolders, m.theme, 1)
 }
 
 // renderCursorList — общий рендер списка строк с курсором-пилюлей
@@ -1844,7 +1877,7 @@ func (m Model) foldersPane() string {
 // правому краю, см. alignBadge), может быть короче labels или nil —
 // недостающие элементы трактуются как "без бейджа" (результаты поиска их
 // не имеют).
-func renderCursorList(labels []string, badges []string, cursor int, contentW int) string {
+func renderCursorList(labels []string, badges []string, cursor int, contentW int, t Theme) string {
 	var sb strings.Builder
 	for i, label := range labels {
 		badge := ""
@@ -1855,7 +1888,7 @@ func renderCursorList(labels []string, badges []string, cursor int, contentW int
 			Width(contentW).
 			Render(alignBadge(label, badge, contentW))
 		if i == cursor {
-			line = lipgloss.NewStyle().Background(chatSelectionColor).Foreground(pillTextColor).Width(contentW).Render(line)
+			line = lipgloss.NewStyle().Background(t.ChatSelectionColor).Foreground(pillTextColor).Width(contentW).Render(line)
 		}
 		sb.WriteString(line)
 		sb.WriteString("\n")
@@ -1879,20 +1912,20 @@ func (m Model) chatPane() string {
 			labels = append(labels, "👤 "+c.Name)
 		}
 		start, end := visibleWindow(len(labels), m.searchCursor, contentRows)
-		content := renderCursorList(labels[start:end], nil, m.searchCursor-start, contentW)
+		content := renderCursorList(labels[start:end], nil, m.searchCursor-start, contentW, m.theme)
 		if len(labels) == 0 {
 			content = "Ничего не найдено"
 		}
-		return paneBox(chatsPaneW, m.paneRowHeight, content, m.focus == focusChats)
+		return paneBox(chatsPaneW, m.paneRowHeight, content, m.focus == focusChats, m.theme, 2)
 	}
 	titles := chatTitles(m.chats)
 	badges := chatBadges(m.chats)
 	start, end := visibleWindow(len(titles), m.chatCursor, contentRows)
-	content := renderCursorList(titles[start:end], badges[start:end], m.chatCursor-start, contentW)
+	content := renderCursorList(titles[start:end], badges[start:end], m.chatCursor-start, contentW, m.theme)
 	if len(m.chats) == 0 {
 		content = "Нет чатов"
 	}
-	return paneBox(chatsPaneW, m.paneRowHeight, content, m.focus == focusChats)
+	return paneBox(chatsPaneW, m.paneRowHeight, content, m.focus == focusChats, m.theme, 2)
 }
 
 // unreadSuffix — бейдж счётчика непрочитанных для названий папок/чатов:
@@ -1957,14 +1990,14 @@ func (m Model) msgPane() string {
 	if m.mode != modeInsert {
 		switch {
 		case m.loadingMsgs:
-			return paneBox(m.viewport.Width, m.viewport.Height, "Загрузка сообщений…", m.focus == focusMessages)
+			return paneBox(m.viewport.Width, m.viewport.Height, "Загрузка сообщений…", m.focus == focusMessages, m.theme, 3)
 		case len(m.messages) == 0:
-			return paneBox(m.viewport.Width, m.viewport.Height, "Выберите чат и нажмите Enter", m.focus == focusMessages)
+			return paneBox(m.viewport.Width, m.viewport.Height, "Выберите чат и нажмите Enter", m.focus == focusMessages, m.theme, 3)
 		default:
 			// bubbles/viewport рисует свою рамку сам через поле Style — цвет фокуса
 			// выставляем перед View(). Это локальная копия Model (value-receiver),
 			// поле ctx не персистится за пределы msgPane — так же, как остальной код.
-			m.viewport.Style = paneBorderStyle(m.focus == focusMessages)
+			m.viewport.Style = paneBorderStyle(m.focus == focusMessages, m.theme, 3)
 			return m.viewport.View()
 		}
 	}
@@ -1979,11 +2012,11 @@ func (m Model) msgPane() string {
 	var top string
 	switch {
 	case m.loadingMsgs:
-		top = paneBox(m.viewport.Width, m.viewport.Height, "Загрузка сообщений…", m.focus == focusMessages)
+		top = paneBox(m.viewport.Width, m.viewport.Height, "Загрузка сообщений…", m.focus == focusMessages, m.theme, 3)
 	case len(m.messages) == 0:
-		top = paneBox(m.viewport.Width, m.viewport.Height, "Пока нет сообщений", m.focus == focusMessages)
+		top = paneBox(m.viewport.Width, m.viewport.Height, "Пока нет сообщений", m.focus == focusMessages, m.theme, 3)
 	default:
-		m.viewport.Style = paneBorderStyle(m.focus == focusMessages)
+		m.viewport.Style = paneBorderStyle(m.focus == focusMessages, m.theme, 3)
 		top = m.viewport.View()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, top, m.composeCard())
@@ -1996,7 +2029,7 @@ func (m Model) msgPane() string {
 // с рамкой (тот же принцип, что у paneBox). alignRight — рисовать метку
 // (время+имя) у правого края верхней рамки, иначе — метку (имя+время) у
 // левого края.
-func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bool) string {
+func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bool, t Theme) string {
 	b := lipgloss.RoundedBorder()
 	if selected {
 		// Двойная рамка — тот же визуальный язык "это выделено", что у
@@ -2006,18 +2039,18 @@ func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bo
 		b = lipgloss.DoubleBorder()
 	}
 
-	bodyColor := messageColor(msg.IsOutgoing)
+	bodyColor := messageColor(msg.IsOutgoing, t)
 	sender := msg.SenderName
 	if sender == "" {
 		sender = "?"
 	}
 	var nameCol, borderCol lipgloss.Color
 	if msg.IsOutgoing {
-		nameCol = ownColor
-		borderCol = ownBorderColor
+		nameCol = t.OwnColor
+		borderCol = t.OwnBorderColor
 	} else {
-		nameCol = nickColor(sender)
-		borderCol = nickBorderColor(sender)
+		nameCol = nickColor(sender, t)
+		borderCol = nickBorderColor(sender, t)
 	}
 
 	borderStyle := lipgloss.NewStyle().Foreground(borderCol)
@@ -2173,7 +2206,7 @@ func naturalCardWidth(msg auth.Message, maxHorizontalSpan int) int {
 // подсчётом добавленных '\n' — так lineOffsets не разъедутся с реальным
 // разбиением на строки (тот же класс бага, что уже дважды ловили в этой
 // функции).
-func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selectedIdx int) (string, []int) {
+func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selectedIdx int, t Theme) (string, []int) {
 	offsets := make([]int, len(msgs))
 	var allLines []string
 
@@ -2184,7 +2217,7 @@ func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selected
 			if sender == "" {
 				sender = "?"
 			}
-			color := messageColor(msg.IsOutgoing)
+			color := messageColor(msg.IsOutgoing, t)
 			nameStyle := lipgloss.NewStyle().Foreground(color)
 			marker := ""
 			if i == selectedIdx {
@@ -2211,7 +2244,7 @@ func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selected
 		// сама naturalCardWidth уже клэмпит внутри себя.
 		cardWidth := min(width, naturalCardWidth(msg, max(0, width-2)))
 		rightAlign := alignOwnRight && msg.IsOutgoing
-		card := renderMessageCard(msg, cardWidth, rightAlign, i == selectedIdx)
+		card := renderMessageCard(msg, cardWidth, rightAlign, i == selectedIdx, t)
 		if rightAlign {
 			pad := strings.Repeat(" ", max(0, width-cardWidth))
 			lines := strings.Split(card, "\n")
@@ -2303,10 +2336,10 @@ func spaceOutRunes(s string, budget int) string {
 // не показывается. По прямому запросу человека: должно быть видно, когда
 // прокрутка панели вообще доступна (например, при сжатии терминала по
 // высоте) — см. scrollIndicatorSuffix.
-func paneTitle(width, num int, text string, focused bool, scroll ...bool) string {
-	color := inactiveBorderColor
+func paneTitle(width, num int, text string, focused bool, t Theme, scroll ...bool) string {
+	color := t.InactiveBorderColor
 	if focused {
-		color = activeBorderColor
+		color = t.ActiveBorderColor
 	}
 	prefix := fmt.Sprintf("[%d] ", num)
 	suffix := ""
@@ -2357,8 +2390,8 @@ func scrollIndicatorSuffix(hasAbove, hasBelow bool) string {
 // paneBorderStyle без паддинга (до этой правки) оба геттера совпадали, поэтому
 // разница не проявлялась. BorderForeground (цвет рамки активной панели) на
 // геометрию не влияет — меняет только цвет символов рамки.
-func paneBox(width, height int, content string, focused bool) string {
-	style := paneBorderStyle(focused)
+func paneBox(width, height int, content string, focused bool, t Theme, paneNum int) string {
+	style := paneBorderStyle(focused, t, paneNum)
 	return style.
 		Width(max(0, width-style.GetHorizontalBorderSize())).
 		Height(max(0, height-style.GetVerticalBorderSize())).
