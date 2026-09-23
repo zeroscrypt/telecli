@@ -187,6 +187,11 @@ telecli send -m "for a channel" -- -1001234567890 # negative chat_id — after "
 
 In insert mode: `Enter` sends, `ctrl+j` inserts a newline, `Esc` cancels and exits.
 
+*(Why `ctrl+j` and not `Shift+Enter`: most terminals send the exact same bytes for `Shift+Enter` as
+for plain `Enter` — telling them apart needs the Kitty keyboard protocol, which
+[bubbletea](https://github.com/charmbracelet/bubbletea) (the TUI library this app is built on)
+doesn't support as of its latest release. `ctrl+j` works identically everywhere.)*
+
 All keybindings can be overridden in `<config dir>/telecli/keybindings.toml` (create it manually,
 `toml` format, fields are lists of key strings per action; missing fields fall back to defaults).
 
