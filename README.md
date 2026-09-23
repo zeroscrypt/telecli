@@ -1,27 +1,29 @@
+[🇷🇺 Русский](README.ru.md) | 🇬🇧 English
+
 # telecli
 
-Терминальный клиент Telegram с vim-подобной модальностью ввода. Написан на Go, протокольное ядро — [TDLib](https://github.com/tdlib/td) через прямой cgo-биндинг.
+A terminal Telegram client with vim-like modal input. Written in Go, protocol core is [TDLib](https://github.com/tdlib/td) via direct cgo bindings.
 
-- Три панели: папки → чаты → лента сообщений, переключение `Tab`/стрелками/цифрами `1`/`2`/`3`.
-- Режимы `Normal`/`Insert`/`Command`, как в vim.
-- Живые обновления входящих сообщений без перезахода в чат.
-- Многострочный черновик, отправка файлов (`ctrl+f`), внешний `$EDITOR` для длинных сообщений (`ctrl+e`).
-- Отправка текста и файлов прямо из shell, без входа в TUI: `telecli send ...`.
-- Настраиваемые горячие клавиши (`keybindings.toml`) и опции интерфейса (`settings.toml`).
+- Three panes: folders → chats → message feed, switch with `Tab`/arrows/number keys `1`/`2`/`3`.
+- `Normal`/`Insert`/`Command` modes, vim-style.
+- Live updates for incoming messages without re-opening the chat.
+- Multi-line draft, file sending (`ctrl+f`), external `$EDITOR` for long messages (`ctrl+e`).
+- Send text and files straight from the shell, without entering the TUI: `telecli send ...`.
+- Configurable keybindings (`keybindings.toml`) and interface options (`settings.toml`).
 
-## Установка
+## Installation
 
-### Зависимости
+### Dependencies
 
-- Go 1.25 или новее.
-- Собранная из исходников TDLib (см. ниже — **не через пакетный менеджер**, это важно).
-- Данные приложения Telegram (`api_id`/`api_hash`) — бесплатно регистрируются на [my.telegram.org](https://my.telegram.org).
+- Go 1.25 or newer.
+- TDLib built from source (see below — **not from a package manager**, this matters).
+- Telegram application credentials (`api_id`/`api_hash`) — register for free at [my.telegram.org](https://my.telegram.org).
 
-### 1. Собрать TDLib
+### 1. Build TDLib
 
-Пакетные версии TDLib (например, `brew install tdlib` на macOS) в лучшем случае устарели на несколько
-лет и Telegram отклоняет вход с такой версией ошибкой `UPDATE_APP_TO_LOGIN`. Собирайте из актуального
-`master`, не из старого тега.
+Packaged versions of TDLib (e.g. `brew install tdlib` on macOS) are at best several years out of
+date, and Telegram rejects login with such a version with `UPDATE_APP_TO_LOGIN`. Build from current
+`master`, not an old tag.
 
 **macOS:**
 
@@ -36,13 +38,13 @@ cmake --build . --target tdjson --target tdjson_static -- -j8
 cmake --install . --prefix "$HOME/.local/tdlib"
 ```
 
-После установки собранная из `master` `libtdjson` использует `@rpath`-относительное имя — без явного
-`rpath` бинарник упадёт с `Library not loaded: @rpath/libtdjson....dylib`. Один раз после сборки
-добавьте флаг `-Wl,-rpath,"${prefix}/lib"` в строку `Libs:` файла
-`~/.local/tdlib/lib/pkgconfig/tdjson.pc` (после `-L...`, перед `-ltdjson`; `cmake --install` перезатрёт
-этот файл при пересборке TDLib — патч нужно будет повторить).
+After installing, the `libtdjson` built from `master` uses an `@rpath`-relative name — without an
+explicit `rpath`, the binary fails with `Library not loaded: @rpath/libtdjson....dylib`. Once after
+building, add the `-Wl,-rpath,"${prefix}/lib"` flag to the `Libs:` line of
+`~/.local/tdlib/lib/pkgconfig/tdjson.pc` (after `-L...`, before `-ltdjson`; `cmake --install`
+overwrites this file on rebuild — the patch needs to be reapplied then).
 
-**Linux (Ubuntu/Debian, не проверено физически, задокументировано по официальным источникам):**
+**Linux (Ubuntu/Debian, not physically verified, documented from official sources):**
 
 ```sh
 sudo apt-get update && sudo apt-get install -y git cmake g++ openssl libssl-dev zlib1g-dev gperf
@@ -54,10 +56,10 @@ cmake --build . --target tdjson --target tdjson_static -j$(nproc)
 cmake --install . --prefix $HOME/.local/tdlib
 ```
 
-Нужно ≥4 ГБ RAM на этапе компиляции. `.pc`-файл, вероятно, тоже нуждается в `-rpath`-патче — сверьте
-по факту, если получите ошибку загрузки библиотеки при запуске.
+Needs ≥4 GB RAM during compilation. The `.pc` file likely also needs the `-rpath` patch — check in
+practice if you get a library-loading error at runtime.
 
-### 2. Собрать telecli
+### 2. Build telecli
 
 ```sh
 git clone https://github.com/zeroscrypt/telecli.git
@@ -65,93 +67,96 @@ cd telecli
 PKG_CONFIG_PATH="$HOME/.local/tdlib/lib/pkgconfig" go build -o telecli ./cmd/telecli
 ```
 
-Если на машине также установлен старый пакетный TDLib — убедитесь, что
-`$HOME/.local/tdlib/lib/pkgconfig` идёт первым в `PKG_CONFIG_PATH`, иначе можно случайно собраться со
-старой версией.
+If an old packaged TDLib is also installed on the machine, make sure
+`$HOME/.local/tdlib/lib/pkgconfig` comes first in `PKG_CONFIG_PATH`, otherwise you might accidentally
+build against the old version.
 
-### 3. Получить данные приложения Telegram
+### 3. Get Telegram application credentials
 
-Зарегистрируйте приложение на [my.telegram.org](https://my.telegram.org) → «API development tools» →
-получите `api_id` и `api_hash`. Передайте их один раз через переменные окружения при первом запуске —
-дальше они сохранятся в системном хранилище учётных данных (Keychain на macOS, Secret Service на
-Linux), запрашивать заново не придётся:
+Register an application at [my.telegram.org](https://my.telegram.org) → "API development tools" →
+get `api_id` and `api_hash`. Pass them once via environment variables on first run — they'll be
+saved to the system credential store afterward (Keychain on macOS, Secret Service on Linux), no need
+to enter them again:
 
 ```sh
 TELECLI_API_ID=12345678 TELECLI_API_HASH=abcdef0123456789abcdef0123456789 ./telecli
 ```
 
-Если системное хранилище недоступно — данные сохраняются в
+If the system credential store is unavailable, the credentials are saved to
 `<config dir>/telecli/config.toml` (macOS: `~/Library/Application Support/telecli/config.toml`,
 Linux: `~/.config/telecli/config.toml`).
 
-При первом запуске также потребуется пройти стандартную авторизацию Telegram (номер телефона, код
-подтверждения, при необходимости — облачный пароль) — запрашивается интерактивно в терминале.
+On first run you'll also need to go through standard Telegram authorization (phone number,
+confirmation code, cloud password if set up) — prompted interactively in the terminal.
 
-## Использование
+## Usage
 
 ```sh
-telecli                                        # запустить TUI
-telecli send @username -m "привет"             # отправить текст без входа в TUI
-telecli send @username -f file.png -m "подпись"
-telecli send 123456789 -m "по числовому chat_id"
-telecli send -m "для канала" -- -1001234567890 # отрицательный chat_id — после "--"
+telecli                                        # launch the TUI
+telecli send @username -m "hello"              # send text without entering the TUI
+telecli send @username -f file.png -m "caption"
+telecli send 123456789 -m "by numeric chat_id"
+telecli send -m "for a channel" -- -1001234567890 # negative chat_id — after "--"
 ```
 
-## Горячие клавиши (Normal-режим, по умолчанию)
+## Keybindings (Normal mode, defaults)
 
-| Клавиша | Действие |
+| Key | Action |
 |---|---|
-| `↑`/`k`, `↓`/`j` | навигация по списку в активной панели |
-| `Tab` | переключить фокус (циклически) |
-| `←`/`→` | фокус на соседнюю панель (без зацикливания) |
-| `1` / `2` / `3` | прямой переход: папки / чаты / сообщения |
-| `Enter` | выбрать/открыть |
-| `Esc` | назад |
-| `i` | войти в режим ввода (нужен выбранный чат) |
-| `:` | командная строка (`:q`/`:quit`) |
-| `ctrl+e` | открыть черновик во внешнем `$EDITOR` |
-| `ctrl+f` | отправить файл (ввод пути) |
-| `q`, `ctrl+c` | выход |
+| `↑`/`k`, `↓`/`j` | navigate the list in the focused pane |
+| `Tab` | cycle focus between panes |
+| `←`/`→` | focus the neighboring pane (no wraparound) |
+| `1` / `2` / `3` | jump directly to: folders / chats / messages |
+| `Enter` | select/open |
+| `Esc` | back |
+| `i` | enter insert mode (needs a selected chat) |
+| `:` | command line (`:q`/`:quit`) |
+| `/` | search chats/channels/contacts |
+| `t` | "about" screen — full list of keybindings |
+| `d` | leave/delete the chat under the cursor (with confirmation) |
+| `ctrl+e` | open the draft in an external `$EDITOR` |
+| `ctrl+f` | send a file (path prompt) |
+| `q`, `ctrl+c` | quit |
 
-В режиме ввода: `Enter` — отправить, `ctrl+j` — перенос строки, `Esc` — отменить и выйти.
+In insert mode: `Enter` sends, `ctrl+j` inserts a newline, `Esc` cancels and exits.
 
-Все клавиши переопределяются в `<config dir>/telecli/keybindings.toml` (создаётся вручную, формат —
-`toml`, поля — списки строк на действие, отсутствующие поля используют значения по умолчанию).
+All keybindings can be overridden in `<config dir>/telecli/keybindings.toml` (create it manually,
+`toml` format, fields are lists of key strings per action; missing fields fall back to defaults).
 
-## Настройки интерфейса
+## Interface settings
 
 `<config dir>/telecli/settings.toml`:
 
 ```toml
-editor = "nano"           # приоритет: это поле → $EDITOR → vi
-align_own_right = true    # прижимать свои сообщения к правому краю (по умолчанию включено)
+editor = "nano"           # priority: this field → $EDITOR → vi
+align_own_right = true    # right-align your own messages (enabled by default)
 ```
 
-## Проверка обновлений
+## Update check
 
-При запуске `telecli` тихо проверяет в фоне, нет ли более новой версии (GitHub Releases этого
-репозитория) — при найденном обновлении справа в нижней строке появляется `vX.Y.Z → vX.Y.Z+1
-(:update)`. Проверить вручную и увидеть результат явно — команда `:update` в Normal-режиме
-(`:` → `update` → `Enter`). Сама команда только показывает, что доступно новее — автоматической
-замены бинарника пока нет, обновляйтесь пересборкой (см. «Установка» выше) или загрузкой нового
-релиза со страницы Releases.
+On launch, `telecli` silently checks in the background whether a newer version is available (this
+repository's GitHub Releases) — if found, `vX.Y.Z → vX.Y.Z+1 (:update)` appears on the right side of
+the bottom line. To check manually and see the result explicitly, use the `:update` command in
+Normal mode (`:` → `update` → `Enter`). The command only shows that a newer version is available —
+there's no automatic binary replacement yet, update by rebuilding (see "Installation" above) or
+downloading the new release from the Releases page.
 
-## Релизы
+## Releases
 
-Версии присваиваются автоматически инструментом [Release Please](https://github.com/googleapis/release-please)
-по [Conventional Commits](https://www.conventionalcommits.org/) в истории коммитов ветки `main`:
+Versions are assigned automatically by [Release Please](https://github.com/googleapis/release-please)
+based on [Conventional Commits](https://www.conventionalcommits.org/) in the `main` branch history:
 
-| Префикс коммита | Результат |
+| Commit prefix | Result |
 |---|---|
 | `fix: ...` | patch (0.1.0 → 0.1.1) |
 | `feat: ...` | minor (0.1.0 → 0.2.0) |
-| `feat!: ...` / `fix!: ...` (или футер `BREAKING CHANGE:`) | major (0.1.0 → 1.0.0) |
+| `feat!: ...` / `fix!: ...` (or a `BREAKING CHANGE:` footer) | major (0.1.0 → 1.0.0) |
 
-При каждом коммите в `main` Release Please обновляет открытый Release PR с накопленным
-`CHANGELOG.md` и следующей версией; при мерже этого PR — сам создаёт git-тег и GitHub Release.
-Официальные бинарники с `-ldflags "-X main.version=vX.Y.Z"` публикуются к релизу отдельно, не
-автоматически этим workflow.
+On every commit to `main`, Release Please updates an open Release PR with the accumulated
+`CHANGELOG.md` and the next version; merging that PR creates the git tag and GitHub Release itself.
+Official binaries built with `-ldflags "-X main.version=vX.Y.Z"` are published to the release
+separately, not automatically by this workflow.
 
-## Лицензия
+## License
 
-MIT — см. [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
