@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/zeroscrypt/telecli/compare/v1.1.2...v1.2.0) (2026-09-23)
+
+
+### Features
+
+* help on h (was t), full help screen, t freed for future About screen ([22bc147](https://github.com/zeroscrypt/telecli/commit/22bc1478bc6cdcdcebe4ee6234a4f2f78405fd48))
+* read receipts, about screen, collapsible side panels, panel bg fixes ([d5c66fb](https://github.com/zeroscrypt/telecli/commit/d5c66fbdd7699cf30d4625e36037173003f56048))
+
 ## [1.1.2](https://github.com/zeroscrypt/telecli/compare/v1.1.1...v1.1.2) (2026-09-23)
 
 
