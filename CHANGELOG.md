@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/zeroscrypt/telecli/compare/v1.1.1...v1.1.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* color profile detection, :help command, color themes ([3d2121e](https://github.com/zeroscrypt/telecli/commit/3d2121e69c05c5a3a6f1b48fca2086c0ab90e116))
+
 ## [1.1.1](https://github.com/zeroscrypt/telecli/compare/v1.1.0...v1.1.1) (2026-09-23)
 
 
