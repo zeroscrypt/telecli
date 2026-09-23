@@ -13,10 +13,24 @@ A terminal Telegram client with vim-like modal input. Written in Go, protocol co
 
 ## Installation
 
-Three ways to get `telecli`, pick one:
+### Quickest: one-line install script
 
-- **[Option A — macOS (Apple Silicon), prebuilt binary](#option-a--macos-apple-silicon-prebuilt-binary)** — fastest, no TDLib install.
-- **[Option B — Linux (x86_64), prebuilt binary](#option-b--linux-x86_64-prebuilt-binary)** — same, for Linux.
+Detects your platform (macOS Apple Silicon or Linux x86_64), downloads the matching prebuilt
+binary, and installs it as `telecli` on your `PATH` — no TDLib install, no picking a file yourself:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zeroscrypt/telecli/public/install.sh | sh
+```
+
+Prefer to see exactly what a script does before piping it to `sh`? It's short:
+[`install.sh`](install.sh). Or use the manual per-platform commands below — same result, one
+extra step (picking the file for your OS yourself).
+
+Three ways to get `telecli` in total, pick one:
+
+- **The script above** — fastest, works for both platforms below automatically.
+- **[Option A — macOS (Apple Silicon), prebuilt binary, manual](#option-a--macos-apple-silicon-prebuilt-binary)** — same result as the script, explicit commands.
+- **[Option B — Linux (x86_64), prebuilt binary, manual](#option-b--linux-x86_64-prebuilt-binary)** — same, for Linux.
 - **[Option C — build from source](#option-c--build-from-source)** — any platform; for auditing what
   you run, or if you're not on one of the two platforms above.
 
@@ -58,8 +72,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Then just run `telecli` from anywhere. To reinstall/update later, run the same three lines again.
 
 *(Both options above are statically linked — no separate TDLib install, no other runtime
-dependency. Prefer one command that detects your platform automatically instead? See
-[`install.sh`](install.sh) — `curl -fsSL https://raw.githubusercontent.com/zeroscrypt/telecli/public/install.sh | sh` does the same thing as Option A/B, just without picking the file yourself. Inspect it before piping to `sh` if you'd rather not run someone else's script blind — it's short.)*
+dependency.)*
 
 ### Option C — build from source
 
@@ -165,9 +178,9 @@ telecli send -m "for a channel" -- -1001234567890 # negative chat_id — after "
 | `Enter` | select/open |
 | `Esc` | back |
 | `i` | enter insert mode (needs a selected chat) |
-| `:` | command line (`:q`/`:quit`) |
+| `:` | command line (`:q`/`:quit`, `:help`, `:update`/`:update install`, `:theme <name>`) |
 | `/` | search chats/channels/contacts |
-| `t` | "about" screen — full list of keybindings |
+| `t` | "about" screen — full list of keybindings (same as `:help`) |
 | `d` | leave/delete the chat under the cursor (with confirmation) |
 | `ctrl+f` | send a file (path prompt) |
 | `q`, `ctrl+c` | quit |
@@ -183,17 +196,26 @@ All keybindings can be overridden in `<config dir>/telecli/keybindings.toml` (cr
 
 ```toml
 align_own_right = true    # right-align your own messages (enabled by default)
+theme = "neon"             # neon (default) / yellow / blue / terracotta
 ```
+
+Themes can also be switched at runtime with `:theme <name>` (Command mode) — this only changes the
+running session, it doesn't write back to `settings.toml`; edit the file by hand to make a theme
+the default on next launch.
 
 ## Update check
 
 On launch, `telecli` silently checks in the background whether a newer version is available (this
 repository's GitHub Releases) — if found, `vX.Y.Z → vX.Y.Z+1 (:update)` appears on the right side of
-the bottom line. To check manually and see the result explicitly, use the `:update` command in
-Normal mode (`:` → `update` → `Enter`). The command only shows that a newer version is available —
-there's no automatic binary replacement yet, update by downloading the new release from the
-[Releases page](https://github.com/zeroscrypt/telecli/releases) (Option A/B commands above
-overwrite the old binary) or rebuilding from source (Option C).
+the bottom line. In Command mode (`:`):
+
+- `:update` — check manually and show the result explicitly (available / already latest / error).
+- `:update install` — download and install the update in place (replaces the running binary on
+  disk; restart `telecli` afterward to actually run the new version).
+
+You can also always update manually — download the new release from the
+[Releases page](https://github.com/zeroscrypt/telecli/releases), rerun the [install script](#quickest-one-line-install-script)/Option A/B commands above (they overwrite the old binary), or rebuild
+from source (Option C).
 
 ## Releases
 
