@@ -88,7 +88,6 @@ type TDClientInterface interface {
 	ChatTitleUpdates() <-chan map[string]interface{}
 	UnreadCountUpdates() <-chan map[string]interface{}
 	UnreadChatCountUpdates() <-chan map[string]interface{}
-	FileUpdates() <-chan map[string]interface{}
 	Close()
 }
 

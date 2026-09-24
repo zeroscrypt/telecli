@@ -30,6 +30,7 @@ type KeyBindings struct {
 	DeleteChat   []string `toml:"delete_chat"`
 	About        []string `toml:"about"`
 	PlayVoice    []string `toml:"play_voice"`
+	PreviewPhoto []string `toml:"preview_photo"`
 }
 
 func DefaultKeyBindings() KeyBindings {
@@ -53,6 +54,7 @@ func DefaultKeyBindings() KeyBindings {
 		DeleteChat:   []string{"d"},
 		About:        []string{"t"},
 		PlayVoice:    []string{"p"},
+		PreviewPhoto: []string{"p"},
 	}
 }
 
@@ -161,6 +163,9 @@ func LoadKeyBindings() (KeyBindings, error) {
 	}
 	if len(fileKeys.PlayVoice) > 0 {
 		keys.PlayVoice = fileKeys.PlayVoice
+	}
+	if len(fileKeys.PreviewPhoto) > 0 {
+		keys.PreviewPhoto = fileKeys.PreviewPhoto
 	}
 	return keys, nil
 }

@@ -2,16 +2,18 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"time"
 )
+
+var fileDownloadPollInterval = 200 * time.Millisecond
 
 // WaitForFileDownload запрашивает скачивание файла fileID (downloadFile) и
 // блокируется, пока у него не появится готовый локальный путь (local.path +
-// is_downloading_completed=true). Свежеотправленным голосовым TDLib обычно
-// отдаёт файл уже скачанным в самом ответе downloadFile — тогда возвращаем
-// сразу, не трогая канал. Иначе ждём updateFile по этому file.id. Чужие
-// файлы игнорируем. Ответ downloadFile не "file" — ошибка.
+// is_downloading_completed=true). Асинхронный downloadFile возвращает текущее
+// состояние сразу после запуска загрузки, поэтому дальнейшую готовность
+// проверяем офлайн-методом getFile: updateFile — общий push-канал с
+// переполнением, и параллельные ожидания конкурировали бы за отдельные события.
 func WaitForFileDownload(ctx context.Context, client TDClientInterface, fileID int32) (string, error) {
 	resp, err := client.Send(ctx, map[string]interface{}{
 		"@type":       "downloadFile",
@@ -22,7 +24,7 @@ func WaitForFileDownload(ctx context.Context, client TDClientInterface, fileID i
 		"synchronous": false,
 	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("downloadFile failed: %w", err)
 	}
 	if resp["@type"] != "file" {
 		return "", fmt.Errorf("unexpected response type: %v", resp["@type"])
@@ -31,25 +33,22 @@ func WaitForFileDownload(ctx context.Context, client TDClientInterface, fileID i
 		return path, nil
 	}
 
-	ch := client.FileUpdates()
+	ticker := time.NewTicker(fileDownloadPollInterval)
+	defer ticker.Stop()
 	for {
 		select {
-		case upd, ok := <-ch:
-			if !ok {
-				return "", errors.New("tdlib: file-updates channel closed before download finished")
+		case <-ticker.C:
+			resp, err := client.Send(ctx, map[string]interface{}{
+				"@type":   "getFile",
+				"file_id": fileID,
+			})
+			if err != nil {
+				return "", fmt.Errorf("getFile failed: %w", err)
 			}
-			if upd["@type"] != "updateFile" {
-				continue
+			if resp["@type"] != "file" {
+				return "", fmt.Errorf("unexpected response type: %v", resp["@type"])
 			}
-			fileObj, ok := upd["file"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-			id, ok := fileObj["id"].(float64)
-			if !ok || int32(id) != fileID {
-				continue // апдейт про другой файл — не наш, ждём дальше
-			}
-			if path, ok := downloadedPath(fileObj); ok {
+			if path, ok := downloadedPath(resp); ok {
 				return path, nil
 			}
 		case <-ctx.Done():

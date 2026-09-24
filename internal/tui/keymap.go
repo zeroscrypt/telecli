@@ -27,6 +27,7 @@ type KeyMap struct {
 	DeleteChat   key.Binding
 	About        key.Binding
 	PlayVoice    key.Binding
+	PreviewPhoto key.Binding
 }
 
 func newKeyMap(cfg config.KeyBindings) KeyMap {
@@ -50,5 +51,6 @@ func newKeyMap(cfg config.KeyBindings) KeyMap {
 		DeleteChat:   key.NewBinding(key.WithKeys(cfg.DeleteChat...), key.WithHelp("d", "удалить/покинуть чат")),
 		About:        key.NewBinding(key.WithKeys(cfg.About...), key.WithHelp("t", "о программе")),
 		PlayVoice:    key.NewBinding(key.WithKeys(cfg.PlayVoice...), key.WithHelp("p", "воспроизвести голосовое")),
+		PreviewPhoto: key.NewBinding(key.WithKeys(cfg.PreviewPhoto...), key.WithHelp("p", "показать фото")),
 	}
 }

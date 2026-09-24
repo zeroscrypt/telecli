@@ -124,10 +124,8 @@ func TestWaitForVoiceFileReadyUnknownSizeSkipsWait(t *testing.T) {
 	}
 }
 
-// TestWaitForVoiceFileReadyWaitsForGrowth — воспроизводит гонку из задачи
-// 0042: путь уже "готов" (is_downloading_completed=true), но файл ещё
-// дописывается на диск. Функция ждёт до достижения ожидаемого размера и
-// только потом возвращается — плеер не увидит обрезанный файл.
+// TestWaitForVoiceFileReadyWaitsForGrowth — проверяет защитный сценарий из
+// задачи 0042: путь готов, но локальный размер ещё меньше ожидаемого.
 func TestWaitForVoiceFileReadyWaitsForGrowth(t *testing.T) {
 	origPoll, origBudget := voiceFileReadinessPoll, voiceFileReadinessBudget
 	defer restoreVoiceReadinessVars(origPoll, origBudget)
@@ -163,10 +161,8 @@ func TestWaitForVoiceFileReadyWaitsForGrowth(t *testing.T) {
 	}
 }
 
-// TestWaitForVoiceFileReadyTimesOutBestEffort — файл так и не дорастает
-// (например, TDLib отдал путь к файлу, который он уже удалил из кэша):
-// по истечении бюджета return происходит всё равно, чтобы не заблокировать
-// воспроизведение бесконечно.
+// TestWaitForVoiceFileReadyTimesOutBestEffort — файл так и не достигает
+// ожидаемого размера: по истечении бюджета return происходит всё равно.
 func TestWaitForVoiceFileReadyTimesOutBestEffort(t *testing.T) {
 	origPoll, origBudget := voiceFileReadinessPoll, voiceFileReadinessBudget
 	defer restoreVoiceReadinessVars(origPoll, origBudget)

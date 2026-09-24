@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -57,7 +58,10 @@ const (
 	// insertHint — подсказка под черновиком в Insert-режиме. Рендерится
 	// отдельной строкой снизу (не дописывается в конец строки ввода), поэтому
 	// в расчёте ширины composeInput не участвует — см. applyLayout.
-	insertHint = " (Enter — отправить, ctrl+j — перенос строки, Esc — отмена)"
+	insertHint       = " (Enter — отправить, ctrl+j — перенос строки, Esc — отмена)"
+	photoPlaceholder = "[фото]"
+	photoPreviewMaxW = 40
+	photoPreviewH    = 10
 )
 
 // focus — какая из трёх панелей активна для клавиатурного ввода. Порядок
@@ -139,6 +143,13 @@ type voiceFileMsg struct {
 	fileID int32
 	path   string
 	err    error
+}
+
+type photoFileMsg struct {
+	messageID int64
+	fileID    int32
+	base64    string
+	err       error
 }
 
 // voicePlayFinishedMsg — внешний плеер (afplay/ffplay/mpv) завершился.
@@ -291,7 +302,8 @@ type Model struct {
 	loadingMsgs    bool
 	sendingMsg     bool
 	sendingFile    bool
-	playingVoice   bool            // true, пока идёт воспроизведение (голосовой файл скачан, плеер запущен)
+	playingVoice   bool // true, пока идёт воспроизведение (голосовой файл скачан, плеер запущен)
+	loadingPhoto   bool
 	displayedChat  int64           // id чата, чья лента отображается/грузится
 	chatReadOutbox map[int64]int64 // chatID -> last_read_outbox_message_id
 
@@ -365,10 +377,12 @@ type Model struct {
 // Style — сам viewport учитывает её при расчёте полезной области. Поля ввода
 // создаются расфокусированными и фокусируются при входе в соответствующий режим.
 // chromeInputStyles — сплошной чёрный фон листовых стилей однострочных полей
-// нижней строки (командная строка, путь файла, поиск): сами поля живут на
-// сплошном чёрном фоне нижней области (см. bottomLine/chromeBackground, 0039),
-// а без фона на собственных листовых стилях их фрагменты (промпт, текст,
-// плейсхолдер, хвостовая доливка до ширины) сбрасывали бы черноту собственными
+// ввода (командная строка, путь файла, поиск): командная строка живёт на
+// сплошном чёрном фоне нижней строки (см. bottomLine/chromeBackground, 0039),
+// поля файла/поиска — внутри чёрного попапа по центру экрана (см.
+// filePopup/searchPopup, 0049). Без фона на собственных листовых стилях их
+// фрагменты (промпт, текст, плейсхолдер, хвостовая доливка до ширины)
+// сбрасывали бы черноту собственными
 // \x1b[0m — тот же механизм, что у карточек сообщений (см. messagePanelBg).
 func chromeInputStyles(in textinput.Model) textinput.Model {
 	in.PromptStyle = in.PromptStyle.Background(chromeBackground)
@@ -477,12 +491,12 @@ func (m *Model) applyLayout() {
 	if m.mode == modeInsert {
 		// Единая рамка панели (paneBox в msgPane) «съедает» КАД панели целиком
 		// (рамка+паддинг, paneFrameV), а чёрная область поля ввода — ещё
-		// m.composeInput.Height() строк снизу внутренней области. Лента
-		// сжимается ровно на это, так что сумма (высота ленты + высота чёрной
-		// области) ТОЧНО равна внутренней высоте единой рамки
-		// (paneRowHeight-paneFrameV) — тот же класс проверки, что уже ловил
-		// баги в этом файле (см. msgPane, 0047).
-		m.viewport.Height = max(0, m.paneRowHeight-paneFrameV-m.composeInput.Height())
+		// composeCardHeight() строк снизу внутренней области (высота поля +
+		// 1 строка отступа НАД текстом черновика, 0048). Лента сжимается ровно
+		// на это, так что сумма (высота ленты + высота чёрной области) ТОЧНО
+		// равна внутренней высоте единой рамки (paneRowHeight-paneFrameV) — тот
+		// же класс проверки, что уже ловил баги в этом файле (см. msgPane, 0047).
+		m.viewport.Height = max(0, m.paneRowHeight-paneFrameV-m.composeCardHeight())
 	}
 	m.commandInput.Width = max(0, m.width-lipgloss.Width(m.commandInput.Prompt)-1)
 	m.fileInput.Width = max(0, m.width-lipgloss.Width(m.fileInput.Prompt)-1)
@@ -541,26 +555,32 @@ func (m *Model) toggleAbout() tea.Cmd {
 }
 
 // composeCardHeight — высота области поля ввода внутри единой рамки панели:
-// просто высота самого поля (рамки у поля больше нет — см. msgPane, 0047).
+// высота самого поля плюс 1 строка отступа сверху (рамки у поля больше нет —
+// см. msgPane, 0047); пустая строка chromeBackground НАД первой строкой
+// черновика — по прямому запросу человека (0048), чтобы текст не начинался
+// сразу с самого края чёрной области.
 func (m Model) composeCardHeight() int {
-	return m.composeInput.Height()
+	return 1 + m.composeInput.Height()
 }
 
 // composePlain — поле ввода как часть единой рамки панели (см. msgPane):
-// прямоугольник чистого chromeBackground шириной feedW и высотой поля ввода.
+// прямоугольник чистого chromeBackground шириной feedW и высотой
+// composeCardHeight() — первая строка пустой отступ НАД текстом черновика
+// (0048), дальше строки самого поля.
 // composeInput.View() уже несёт chromeBackground на каждой своей строке (стили
 // Base, см. New), но фон внешнего стиля не переживает вложенных \x1b[0m (тот
 // же механизм, что у bgFill/chromeLine, 0039) — оставшиеся пустые колонки и
 // строки доливаем bgFill'ом явно, не полагаясь на протекание.
 func (m Model) composePlain(feedW int) string {
 	w := max(0, feedW)
-	lines := strings.Split(m.composeInput.View(), "\n")
+	lines := []string{bgFill(chromeBackground, w)}
+	lines = append(lines, strings.Split(m.composeInput.View(), "\n")...)
 	for i, l := range lines {
 		if d := max(0, w-lipgloss.Width(l)); d > 0 {
 			lines[i] = l + bgFill(chromeBackground, d)
 		}
 	}
-	for len(lines) < m.composeInput.Height() {
+	for len(lines) < m.composeCardHeight() {
 		lines = append(lines, bgFill(chromeBackground, w))
 	}
 	return strings.Join(lines, "\n")
@@ -607,9 +627,10 @@ func (m *Model) switchDisplayedChat(newChatID int64) {
 
 // syncComposeHeight подгоняет высоту черновика под текущее число строк —
 // от composeAreaHeight (минимум) до composeAreaMaxHeight (потолок), и сразу
-// пересчитывает layout (applyLayout читает m.composeInput.Height() для
-// bottomReserve). По прямому запросу человека: поле ввода растёт вниз при
-// добавлении строк, "поднимая" ленту сообщений вверх — GotoBottom()
+// пересчитывает layout (applyLayout читает composeCardHeight() для расчёта
+// высоты вьюпорта — та уже включает строку отступа, см. её). По прямому
+// запросу человека: поле ввода растёт вниз при добавлении строк, "поднимая"
+// ленту сообщений вверх — GotoBottom()
 // гарантирует, что нижняя граница ленты (последнее сообщение) остаётся
 // видна при каждом таком росте/сжатии, а не уезжает за пределы экрана.
 // Вызывается после КАЖДОГО изменения содержимого m.composeInput (набор
@@ -630,11 +651,16 @@ func (m *Model) syncComposeHeight() {
 }
 
 // rerenderMessagesAndScrollToCursor перестраивает контент ленты с подсветкой
-// m.messageCursor и минимально прокручивает viewport так, чтобы верхняя
-// строка выбранной карточки была видна: если она выше текущей видимой
-// области — скроллим вверх до неё; если ниже — скроллим вниз ровно настолько,
-// чтобы она стала последней видимой строкой. Если уже видна — YOffset не
-// трогаем (не дёргаем прокрутку зря).
+// m.messageCursor и минимально прокручивает viewport так, чтобы карточка
+// выбранного сообщения была видна ЦЕЛИКОМ, из диапазона [start, end], не
+// только своей первой строкой: если верх карточки выше текущей видимой
+// области — скроллим вверх до неё; если НИЗ карточки (последняя строка её
+// рамки) ниже — скроллим вниз ровно настолько, чтобы низ стал последней
+// видимой строкой. Если карточка умещается — YOffset не трогаем (не дёргаем
+// прокрутку зря). Баг 0048: раньше скролл вниз равнялся только на начало
+// карточки, многострочная карточка целиком не показывалась (низ оставался
+// за кадром), хотя Space/PageDown — дефолтный скролл viewport, не привязанный
+// к границам карточки, — доходил до конца нормально.
 func (m *Model) rerenderMessagesAndScrollToCursor() {
 	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
 	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
@@ -643,11 +669,20 @@ func (m *Model) rerenderMessagesAndScrollToCursor() {
 		return
 	}
 	start := offsets[m.messageCursor]
+	// end — индекс последней строки выбранной карточки (0-based). Между
+	// карточками ровно одна пустая строка-разделитель (см. renderMessages),
+	// поэтому у всех карточек кроме последней её конец — на 2 строки выше
+	// начала следующей (разделитель + последняя строка самой карточки);
+	// у последней карточки конец — последняя строка всего контента.
+	end := strings.Count(content, "\n")
+	if m.messageCursor+1 < len(offsets) {
+		end = offsets[m.messageCursor+1] - 2
+	}
 	switch {
 	case start < m.viewport.YOffset:
 		m.viewport.SetYOffset(start)
-	case start >= m.viewport.YOffset+m.viewport.Height:
-		m.viewport.SetYOffset(start - m.viewport.Height + 1)
+	case end >= m.viewport.YOffset+m.viewport.Height:
+		m.viewport.SetYOffset(max(0, end-m.viewport.Height+1))
 	}
 }
 
@@ -804,6 +839,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		m.playingVoice = true
 		return m, m.playProcessCmd(msg.path)
+
+	case photoFileMsg:
+		m.loadingPhoto = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Ошибка скачивания фото: %v", msg.err)
+			return m, nil
+		}
+		m.status = ""
+		for i := range m.messages {
+			if m.messages[i].ID == msg.messageID && m.messages[i].PhotoFileID == msg.fileID {
+				m.messages[i].PhotoBase64 = msg.base64
+				m.rerenderMessagesAndScrollToCursor()
+				return m, nil
+			}
+		}
+		return m, nil
 
 	case voicePlayFinishedMsg:
 		m.playingVoice = false
@@ -1304,6 +1355,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.toggleAbout()
 			return m, cmd
 		}
+		if key.Matches(msg, m.keys.PreviewPhoto) {
+			if m.focus != focusMessages {
+				m.status = "показ фото — только в панели сообщений"
+				return m, nil
+			}
+			if len(m.messages) == 0 || m.messageCursor < 0 || m.messageCursor >= len(m.messages) {
+				m.status = "нет сообщения под курсором"
+				return m, nil
+			}
+			if m.messages[m.messageCursor].IsPhoto {
+				if m.loadingPhoto {
+					m.status = "Фото уже скачивается"
+					return m, nil
+				}
+				if m.messages[m.messageCursor].PhotoBase64 != "" {
+					m.status = "Фото уже показано"
+					return m, nil
+				}
+				if !isITerm2(os.Getenv("TERM_PROGRAM")) {
+					m.status = "Инлайн-фото поддерживается только в iTerm2"
+					return m, nil
+				}
+				m.loadingPhoto = true
+				m.status = "Загрузка фото…"
+				return m, m.previewPhotoCmd(m.messages[m.messageCursor])
+			}
+		}
 		if key.Matches(msg, m.keys.PlayVoice) {
 			if m.focus != focusMessages {
 				m.status = "воспроизведение голосового — только в панели сообщений"
@@ -1775,10 +1853,8 @@ func (m Model) sendFileCmd(chatID int64, path string) tea.Cmd {
 
 // playVoiceCmd — шаг скачивания: downloadFile + ожидание готового пути.
 // Тот же паттерн захвата m.ctx/m.client, что у sendFileCmd/sendMessageCmd.
-// После готового пути — ещё короткая проверка размера файла на диске
-// (waitForVoiceFileReady): TDLib может пометить скачивание завершённым, пока
-// последние байты дописываются, и плеер прочитает обрезанный файл (задача
-// 0042, обрыв голосового через ~2с). Выполняется в goroutine команды, не
+// После готового пути выполняется дополнительная best-effort проверка размера
+// локальной копии (waitForVoiceFileReady). Выполняется в goroutine команды, не
 // блокируя цикл сообщений TUI.
 func (m Model) playVoiceCmd(msg auth.Message) tea.Cmd {
 	ctx := m.ctx
@@ -1794,6 +1870,28 @@ func (m Model) playVoiceCmd(msg auth.Message) tea.Cmd {
 			waitForVoiceFileReady(path, voiceSize)
 		}
 		return voiceFileMsg{fileID: fileID, path: path, err: err}
+	}
+}
+
+func (m Model) previewPhotoCmd(msg auth.Message) tea.Cmd {
+	ctx := m.ctx
+	client := m.client
+	return func() tea.Msg {
+		dlCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		path, err := auth.WaitForFileDownload(dlCtx, client, msg.PhotoFileID)
+		if err != nil {
+			return photoFileMsg{messageID: msg.ID, fileID: msg.PhotoFileID, err: err}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return photoFileMsg{messageID: msg.ID, fileID: msg.PhotoFileID, err: fmt.Errorf("не удалось прочитать фото: %w", err)}
+		}
+		return photoFileMsg{
+			messageID: msg.ID,
+			fileID:    msg.PhotoFileID,
+			base64:    base64.StdEncoding.EncodeToString(data),
+		}
 	}
 }
 
@@ -1946,6 +2044,12 @@ func (m Model) View() string {
 	if m.mode == modeAbout {
 		return m.aboutScreen()
 	}
+	if m.mode == modeFile {
+		return m.filePopup()
+	}
+	if m.mode == modeSearch {
+		return m.searchPopup()
+	}
 	fStart, fEnd := visibleWindow(len(m.folders)+1, m.folderCursor, m.listContentRows())
 	cStart, cEnd := visibleWindow(m.chatListLen(), m.chatListCursor(), m.listContentRows())
 	foldersTitle := paneTitle(m.foldersPaneWidth(), 1, "Папки", m.focus == focusFolders, m.theme, fStart > 0, fEnd < len(m.folders)+1)
@@ -1966,6 +2070,83 @@ func (m Model) View() string {
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, m.foldersPane(), m.chatPane(), m.msgPane())
 	body := titles + "\n" + panes + "\n" + m.bottomLine()
 	return body
+}
+
+// centeredPopup — попап по центру экрана: рамка, сплошной чёрный фон
+// (chromeBackground), внутренний паддинг, произвольные строки контента
+// (заголовок/описание/поле ввода). Пространство вокруг попапа тоже красится
+// chromeBackground (lipgloss.WithWhitespaceBackground) — иначе вокруг попапа
+// остался бы непрокрашенный терминальный фон (0039/0042). Каждая СТРОКА
+// контента, собранная из НЕСКОЛЬКИХ разных стилей Render(...) подряд, должна
+// нести chromeBackground на каждом фрагменте — фон внешнего стиля не
+// переживает вложенного \x1b[0m; голые нестилизованные строки фикса не
+// требуют. boxW — ширина попапа С РАМКОЙ (не вся ширина экрана — попап, не
+// полноэкранный оверлей, в отличие от helpScreen/aboutScreen).
+func centeredPopup(screenW, screenH, boxW int, t Theme, lines []string) string {
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.ActiveBorderColor).
+		BorderBackground(chromeBackground).
+		Background(chromeBackground).
+		Padding(1, 2).
+		Width(boxW)
+	box := style.Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(screenW, screenH, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceBackground(chromeBackground))
+}
+
+// filePopup — центрированный попап ввода пути к файлу (modeFile, ctrl+f):
+// заголовок, пустая строка, поле ввода m.fileInput, при m.sendingFile —
+// подсказка "(отправка…)" под полем. Сама логика ввода/подтверждения/отмены
+// НЕ менялась (см. case modeFile в Update) — изменилось только то, ГДЕ это
+// рисуется: внизу на нижней строке (bottomLine) было, теперь попап по центру
+// экрана.
+func (m Model) filePopup() string {
+	// Ширину поля вводим под внутреннюю ширину попапа (boxW минус
+	// горизонтальный паддинг 2+2, минус сам промпт и минус колонку курсора) на
+	// ЛОКАЛЬНОЙ копии: в applyLayout она выставлена под всю ширину терминала, а
+	// здесь поле живёт внутри рамки попапа — его же хвостовая доливка (см.
+	// textinput.View, строка = промпт+значение+курсор+доливка до Width)
+	// разорвала бы правую стенку рамки, останься ширина терминальной.
+	boxW := max(0, min(70, m.width-6))
+	m.fileInput.Width = max(0, boxW-4-lipgloss.Width(m.fileInput.Prompt)-1)
+	title := lipgloss.NewStyle().Bold(true).Foreground(m.theme.ActiveBorderColor).
+		Background(chromeBackground).Render("Отправить файл")
+	lines := []string{
+		title,
+		"",
+		m.fileInput.View(),
+	}
+	if m.sendingFile {
+		lines = append(lines, chromeText("(отправка…)"))
+	}
+	return centeredPopup(m.width, m.height, boxW, m.theme, lines)
+}
+
+// searchPopup — центрированный попап ввода поискового запроса (modeSearch,
+// "/"): заголовок, описание того, что именно ищет SearchAll (чаты/каналы/
+// контакты — по прямому запросу человека, в нижней строке такого описания
+// не было), пустая строка, поле ввода m.searchInput, при m.searchingNow —
+// подсказка "(поиск…)". Результаты поиска, как и раньше, показываются в
+// панели чатов (chatPane переключается на них по m.searchActive) — попап
+// занимается только вводом запроса, до появления результатов.
+func (m Model) searchPopup() string {
+	boxW := max(0, min(70, m.width-6))
+	m.searchInput.Width = max(0, boxW-4-lipgloss.Width(m.searchInput.Prompt)-1)
+	title := lipgloss.NewStyle().Bold(true).Foreground(m.theme.ActiveBorderColor).
+		Background(chromeBackground).Render("Поиск")
+	desc := lipgloss.NewStyle().Faint(true).Background(chromeBackground).
+		Render("Поиск чатов, каналов и контактов в Telegram")
+	lines := []string{
+		title,
+		desc,
+		"",
+		m.searchInput.View(),
+	}
+	if m.searchingNow {
+		lines = append(lines, chromeText("(поиск…)"))
+	}
+	return centeredPopup(m.width, m.height, boxW, m.theme, lines)
 }
 
 // helpScreen — полноэкранный оверлей "о программе" (modeHelp): описание +
@@ -2003,7 +2184,7 @@ func (m Model) helpScreen() string {
 		keyLine(":", "командная строка"),
 		keyLine("/", "поиск чатов/каналов/контактов"),
 		keyLine("ctrl+f", "отправить файл (ввод пути)"),
-		keyLine("p", "воспроизвести голосовое под курсором"),
+		keyLine("p", "воспроизвести голосовое / показать фото под курсором (iTerm2)"),
 		keyLine("d", "покинуть/удалить чат под курсором — далее y/Y подтвердить, любая другая клавиша/esc отменить"),
 		keyLine("h", "это окно (то же самое, что :help)"),
 		keyLine("t", "экран «о программе» — логотип TELECLi, версия, ссылка, автор"),
@@ -2274,22 +2455,13 @@ func playbackHintSuffix(playing bool) string {
 
 // bottomLine — нижняя область зарезервированной высоты: командная строка,
 // многострочное поле черновика с подсказкой или статус/индикатор режима.
+// modeFile/modeSearch в нижней строке больше не рисуются — их поля ввода
+// переехали в центрированные попапы по центру экрана (filePopup/searchPopup,
+// 0049).
 func (m Model) bottomLine() string {
 	switch m.mode {
 	case modeCommand:
 		return chromeLine(m.width, m.commandInput.View())
-	case modeFile:
-		hint := ""
-		if m.sendingFile {
-			hint = " (отправка…)"
-		}
-		return chromeLine(m.width, m.fileInput.View()+chromeText(hint))
-	case modeSearch:
-		hint := ""
-		if m.searchingNow {
-			hint = " (поиск…)"
-		}
-		return chromeLine(m.width, m.searchInput.View()+chromeText(hint))
 	case modeInsert:
 		// Сам черновик (composeInput.View()) здесь больше НЕ рендерится —
 		// он переехал в msgPane() как отдельная карточка с белой рамкой
@@ -2316,7 +2488,9 @@ func (m Model) bottomLine() string {
 		return chromeLine(m.width, lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Background(chromeBackground).Render(prompt))
 	default:
 		if m.status != "" {
-			return chromeLine(m.width, lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Background(chromeBackground).Render(m.status))
+			// Весь текст статуса — ярко-белым (а не красным, как было): по
+			// запросу человека красный цвет «путает» при обновлениях (0048).
+			return chromeLine(m.width, lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(chromeBackground).Render(m.status))
 		}
 		logo := telecliLogo(m.theme)
 		modeTag := lipgloss.NewStyle().Foreground(m.theme.ActiveBorderColor).Bold(true).Background(chromeBackground).Render(" NAV")
@@ -2335,7 +2509,7 @@ func (m Model) bottomLine() string {
 		case focusChats:
 			pairs = append(pairs, [2]string{"/", "поиск"}, [2]string{"d", "удалить чат"})
 		case focusMessages:
-			pairs = append(pairs, [2]string{"ctrl+f", "файл"}, [2]string{"p", "голосовое"})
+			pairs = append(pairs, [2]string{"ctrl+f", "файл"}, [2]string{"p", "медиа"})
 		}
 		hint := bgFill(chromeBackground, 1) + renderHint(" · ", m.theme, pairs...) + chromeText(playbackHintSuffix(m.playingVoice && m.mode == modeNormal))
 		left := logo + modeTag + hint
@@ -2682,6 +2856,18 @@ func (m Model) msgPane() string {
 	return paneBox(paneW, m.paneRowHeight, joined, m.focus == focusMessages, m.theme, 3)
 }
 
+func isITerm2(termProgram string) bool {
+	return termProgram == "iTerm.app"
+}
+
+func iTerm2InlineImage(encoded string, width, height int) string {
+	return fmt.Sprintf("\x1b]1337;File=inline=1;width=%d;height=%d;preserveAspectRatio=1:%s\a", width, height, encoded)
+}
+
+func photoPreviewReady(msg auth.Message, termProgram string) bool {
+	return msg.IsPhoto && msg.PhotoBase64 != "" && isITerm2(termProgram)
+}
+
 // renderMessageCard рисует одно сообщение как отдельную рамку (одинарная
 // скруглённая — не путать с двойной рамкой активной панели из 0020),
 // приглушённого цвета отправителя; имя+время встроены прямо в верхнюю линию
@@ -2805,14 +2991,24 @@ func renderMessageCard(msg auth.Message, width int, alignRight bool, selected bo
 	}
 	padRendered := bgFill(panelBg, padW)
 	textWidth := max(1, contentSlot-2*padW)
-	bodyRendered := lipgloss.NewStyle().Foreground(bodyColor).Width(textWidth).Background(panelBg).Render(msg.Text)
 
 	var sb strings.Builder
 	sb.WriteString(top)
 	sb.WriteString("\n")
-	for _, line := range strings.Split(bodyRendered, "\n") {
-		sb.WriteString(borderStyle.Render(b.Left) + padRendered + line + padRendered + borderStyle.Render(b.Right))
+	if photoPreviewReady(msg, os.Getenv("TERM_PROGRAM")) {
+		previewWidth := min(photoPreviewMaxW, textWidth)
+		sb.WriteString(borderStyle.Render(b.Left) + padRendered + iTerm2InlineImage(msg.PhotoBase64, previewWidth, photoPreviewH) + padRendered + borderStyle.Render(b.Right))
 		sb.WriteString("\n")
+	} else {
+		bodyText := msg.Text
+		if msg.IsPhoto {
+			bodyText = photoPlaceholder
+		}
+		bodyRendered := lipgloss.NewStyle().Foreground(bodyColor).Width(textWidth).Background(panelBg).Render(bodyText)
+		for _, line := range strings.Split(bodyRendered, "\n") {
+			sb.WriteString(borderStyle.Render(b.Left) + padRendered + line + padRendered + borderStyle.Render(b.Right))
+			sb.WriteString("\n")
+		}
 	}
 	sb.WriteString(borderStyle.Render(b.BottomLeft + strings.Repeat(b.Bottom, horizontalSpan) + b.BottomRight))
 	return sb.String()
@@ -2944,6 +3140,10 @@ func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selected
 		// уже ловили 4 раза в этом проекте) — страховка на всякий случай,
 		// сама naturalCardWidth уже клэмпит внутри себя.
 		cardWidth := min(width, naturalCardWidth(msg, max(0, width-2), lastReadOutboxMessageID))
+		showPhoto := photoPreviewReady(msg, os.Getenv("TERM_PROGRAM"))
+		if showPhoto {
+			cardWidth = max(cardWidth, min(width, photoPreviewMaxW+4))
+		}
 		rightAlign := alignOwnRight && msg.IsOutgoing
 		card := renderMessageCard(msg, cardWidth, rightAlign, i == selectedIdx, t, lastReadOutboxMessageID)
 		lines := strings.Split(card, "\n")
@@ -2961,7 +3161,15 @@ func renderMessages(msgs []auth.Message, width int, alignOwnRight bool, selected
 		// голые пробелы после последнего \x1b[0m строки) — заполняем их
 		// фоновым цветом явно.
 		for j, l := range lines {
-			if gap := width - lipgloss.Width(l); gap > 0 {
+			lineWidth := lipgloss.Width(l)
+			if showPhoto && strings.Contains(l, "\x1b]1337;File=") {
+				if rightAlign {
+					lineWidth = width
+				} else {
+					lineWidth = cardWidth
+				}
+			}
+			if gap := width - lineWidth; gap > 0 {
 				lines[j] = l + bgFill(messagePanelBg(), gap)
 			}
 		}

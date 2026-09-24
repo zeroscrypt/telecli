@@ -19,7 +19,10 @@ type Message struct {
 	IsVoiceNote   bool  // true — content имеет тип messageVoiceNote с валидным voice_note.voice.id
 	VoiceFileID   int32 // file.id голосового (для downloadFile) — см. parseMessage
 	VoiceDuration int   // duration в секундах (JSON-ключ без _, см. файл задачи)
-	VoiceSize     int64 // ожидаемый размер файла в байтах (voice_note.voice.size) — для проверки готовности файла на диске перед запуском плеера, см. задачу 0042
+	VoiceSize     int64 // размер файла в байтах (voice_note.voice.size) — дополнительная проверка локальной копии перед воспроизведением
+	IsPhoto       bool
+	PhotoFileID   int32
+	PhotoBase64   string
 }
 
 // historyRetryDelays — задержки между повторными попытками getChatHistory,
@@ -121,6 +124,11 @@ func parseMessage(ctx context.Context, client TDClientInterface, msgMap map[stri
 		msg.VoiceSize = size
 		msg.Text = fmt.Sprintf("▶ голосовое [%s]", formatVoiceDuration(dur))
 	}
+	if fileID, ok := photoInfo(msgMap); ok {
+		msg.IsPhoto = true
+		msg.PhotoFileID = fileID
+		msg.Text = "[фото]"
+	}
 	if id, ok := msgMap["id"].(float64); ok {
 		msg.ID = int64(id)
 	}
@@ -161,6 +169,52 @@ func voiceNoteInfo(msg map[string]interface{}) (fileID int32, duration int, size
 	dur, _ := vn["duration"].(float64)
 	sizeF, _ := voice["size"].(float64)
 	return int32(id), int(dur), int64(sizeF), true
+}
+
+func photoInfo(msg map[string]interface{}) (int32, bool) {
+	content, ok := msg["content"].(map[string]interface{})
+	if !ok {
+		return 0, false
+	}
+	if contentType, _ := content["@type"].(string); contentType != "messagePhoto" {
+		return 0, false
+	}
+	photo, ok := content["photo"].(map[string]interface{})
+	if !ok {
+		return 0, false
+	}
+	sizes, ok := photo["sizes"].([]interface{})
+	if !ok {
+		return 0, false
+	}
+
+	var bestID int32
+	var bestArea float64
+	for _, rawSize := range sizes {
+		size, ok := rawSize.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		width, widthOK := size["width"].(float64)
+		height, heightOK := size["height"].(float64)
+		if !widthOK || !heightOK || width <= 0 || height <= 0 {
+			continue
+		}
+		file, ok := size["photo"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, ok := file["id"].(float64)
+		if !ok || id <= 0 {
+			continue
+		}
+		area := width * height
+		if bestID == 0 || area > bestArea {
+			bestID = int32(id)
+			bestArea = area
+		}
+	}
+	return bestID, bestID > 0
 }
 
 // formatVoiceDuration — продолжительность голосового в "M:SS": минуты без

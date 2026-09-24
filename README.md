@@ -184,9 +184,13 @@ telecli send -m "for a channel" -- -1001234567890 # negative chat_id — after "
 | `t` | about screen — TELECLi logo, version, GitHub link, author |
 | `d` | leave/delete the chat under the cursor (with confirmation) |
 | `ctrl+f` | send a file (path prompt) |
+| `p` | play a voice message / show a photo inline in iTerm2 |
 | `q`, `ctrl+c` | quit |
 
 In insert mode: `Enter` sends, `ctrl+j` inserts a newline, `Esc` cancels and exits.
+
+Inline photos are downloaded only after pressing `p` and are rendered only when `TERM_PROGRAM` is exactly
+`iTerm.app`; other terminals keep the `[фото]` placeholder.
 
 *(Why `ctrl+j` and not `Shift+Enter`: most terminals send the exact same bytes for `Shift+Enter` as
 for plain `Enter` — telling them apart needs the Kitty keyboard protocol, which

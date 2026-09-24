@@ -34,7 +34,7 @@ func TestLoadKeyBindingsPartialOverride(t *testing.T) {
 	_, cleanup := setupKeyBindingsTest(t)
 	defer cleanup()
 
-	writeKeyBindingsFile(t, "quit = [\"x\"]\nplay_voice = [\"v\"]")
+	writeKeyBindingsFile(t, "quit = [\"x\"]\nplay_voice = [\"v\"]\npreview_photo = [\"f\"]")
 
 	keys, err := LoadKeyBindings()
 	require.NoError(t, err)
@@ -42,6 +42,7 @@ func TestLoadKeyBindingsPartialOverride(t *testing.T) {
 	defaults := DefaultKeyBindings()
 	require.Equal(t, []string{"x"}, keys.Quit)
 	require.Equal(t, []string{"v"}, keys.PlayVoice)
+	require.Equal(t, []string{"f"}, keys.PreviewPhoto)
 	require.Equal(t, defaults.MoveUp, keys.MoveUp)
 	require.Equal(t, defaults.MoveDown, keys.MoveDown)
 	require.Equal(t, defaults.FocusNext, keys.FocusNext)
@@ -96,7 +97,8 @@ search = ["/"]
 show_help = ["h"]
 delete_chat = ["x"]
 about = ["a"]
-play_voice = ["p"]
+play_voice = ["v"]
+preview_photo = ["f"]
 `)
 
 	keys, err := LoadKeyBindings()
@@ -121,7 +123,8 @@ play_voice = ["p"]
 		ShowHelp:     []string{"h"},
 		DeleteChat:   []string{"x"},
 		About:        []string{"a"},
-		PlayVoice:    []string{"p"},
+		PlayVoice:    []string{"v"},
+		PreviewPhoto: []string{"f"},
 	}
 	require.Equal(t, want, keys)
 }

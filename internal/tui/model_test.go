@@ -103,8 +103,6 @@ func (f *fakeClient) UnreadChatCountUpdates() <-chan map[string]interface{} {
 	return f.unreadChatCountCh
 }
 
-func (f *fakeClient) FileUpdates() <-chan map[string]interface{} { return nil }
-
 func (f *fakeClient) Close() {}
 
 func keyRune(r rune) tea.KeyMsg {
@@ -707,6 +705,27 @@ func TestBottomLineBackgroundsContiguous(t *testing.T) {
 	}
 }
 
+// TestBottomLineStatusIsBrightWhiteNotRed — текст статуса в Normal-режиме
+// (default-ветка bottomLine, когда m.status != "") рендерится ярко-белым
+// ANSI-цветом "15" (\x1b[97…), а НЕ красным "9" (\x1b[91…), как было: по
+// запросу человека (0048) красный цвет при обновлениях «путает». Проверяем
+// префикс \x1b[97, а не полный "\x1b[97m": lipgloss склеивает foreground и
+// background в один SGR-сегмент (\x1b[97;48;2;0;0;0m).
+func TestBottomLineStatusIsBrightWhiteNotRed(t *testing.T) {
+	m := testModel(t, nil)
+	m.status = "Обновлено до v0.6.0"
+	got := m.bottomLine()
+	if !strings.Contains(got, m.status) {
+		t.Fatalf("expected status text in bottom line, got: %q", got)
+	}
+	if strings.Contains(got, "\x1b[91") {
+		t.Fatalf("status must not render bright red (\\x1b[91…), got: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[97") {
+		t.Fatalf("expected bright white \\x1b[97… foreground for status, got: %q", got)
+	}
+}
+
 // Тест бага 0042 живой проверки: фон хрома не покрывал :help/t (about) экраны
 // целиком — строки там собраны из НЕСКОЛЬКИХ Render(...)-фрагментов подряд
 // (заголовок, keyLine в help, баннер в about), и фон внешнего paneBox
@@ -730,6 +749,142 @@ func TestHelpAboutBackgroundsContiguous(t *testing.T) {
 				t.Errorf("%s line %d: uncovered columns %v (фон терминала): %q", name, i, cols, line)
 			}
 		}
+	}
+}
+
+// Тесты задачи 0049: ввод пути файла (modeFile, ctrl+f) и поиска (modeSearch,
+// "/") теперь рисуются ЦЕНТРИРОВАННЫМИ ПОПАПАМИ (filePopup/searchPopup) вместо
+// полей в нижней строке. Проверки: (1) попап — не полноэкранный (boxW+2 <
+// ширины экрана), горизонтально отцентрован (ведущее поле до рамки ==
+// замыкающему, допуск ±1 на нечётный остаток lipgloss.Place), (2) итоговая
+// картинка View — ровно m.width×m.height, без фоновых "дыр" в цвет хрома
+// (методика uncoveredCols из 0039/0042/0047), (3) контент попапа (заголовок,
+// набранный текст) реально виден.
+func TestFileAndSearchPopupCenteredAndBackgroundsContiguous(t *testing.T) {
+	cases := []struct {
+		name     string
+		title    string
+		setup    func(m Model) Model
+		typeText string
+	}{
+		{
+			name:  "file",
+			title: "Отправить файл",
+			setup: func(m Model) Model {
+				m.displayedChat = 111
+				m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyCtrlF})
+				return m
+			},
+			typeText: "/tmp/файл.txt",
+		},
+		{
+			name:  "search",
+			title: "Поиск",
+			setup: func(m Model) Model {
+				m, _ = updateModel(m, keyRune('/'))
+				return m
+			},
+			typeText: "запрос",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testModel(t, nil)
+			m = tc.setup(m)
+			m = typeText(m, tc.typeText)
+
+			got := m.View()
+			lines := strings.Split(got, "\n")
+			if len(lines) != m.height {
+				t.Fatalf("expected %d rows, got %d", m.height, len(lines))
+			}
+
+			boxW := min(70, m.width-6)
+			totalBoxW := boxW + 2 // рамка занимает ещё по одной колонке с каждой стороны
+
+			titleLine := -1
+			for i, l := range lines {
+				if w := lipgloss.Width(l); w != m.width {
+					t.Fatalf("row %d: expected width %d, got %d", i, m.width, w)
+				}
+				if cols := uncoveredCols(l); len(cols) > 0 {
+					t.Errorf("row %d: uncovered columns %v (терминальный фон вместо хрома)", i, cols)
+				}
+				if titleLine < 0 && strings.Contains(stripANSI(l), tc.title) {
+					titleLine = i
+				}
+			}
+			if titleLine < 0 {
+				t.Fatalf("popup title %q not found in View", tc.title)
+			}
+
+			// Попап по центру: ведущее пространство до рамки == замыкающему за ней.
+			stripped := stripANSI(lines[titleLine])
+			left := lipgloss.Width(stripped) - lipgloss.Width(strings.TrimLeft(stripped, " "))
+			right := m.width - left - totalBoxW
+			if diff := left - right; diff < -1 || diff > 1 {
+				t.Fatalf("popup not centered: left=%d right=%d (width=%d boxW=%d)", left, right, m.width, boxW)
+			}
+			if totalBoxW >= m.width {
+				t.Fatalf("popup must not be full-screen: boxW+2=%d >= width=%d", totalBoxW, m.width)
+			}
+
+			if !strings.Contains(stripANSI(got), tc.typeText) {
+				t.Fatalf("typed text %q not visible in popup View", tc.typeText)
+			}
+		})
+	}
+}
+
+// TestBottomLineNoFileSearchInputs — режимы modeFile/modeSearch больше НЕ рисуют
+// свои поля ввода в нижней строке (0049): их ввод переехал в центрированные
+// попапы, и View() отдаёт попап досрочно, раньше, чем доходит до bottomLine.
+// Проверяем, что bottomLine() для этих режимов не содержит ни промпта, ни
+// набранного текста, а View() — содержит (текст виден в попапе).
+func TestBottomLineNoFileSearchInputs(t *testing.T) {
+	cases := []struct {
+		name        string
+		wantInView  string
+		setup       func(m Model) Model
+		typeText    string
+		extraInView string
+	}{
+		{
+			name:       "file",
+			wantInView: "/tmp/путь.txt",
+			setup: func(m Model) Model {
+				m.displayedChat = 111
+				m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyCtrlF})
+				return m
+			},
+			typeText:    "/tmp/путь.txt",
+			extraInView: "Отправить файл",
+		},
+		{
+			name:        "search",
+			wantInView:  "запрос",
+			setup:       func(m Model) Model { m, _ = updateModel(m, keyRune('/')); return m },
+			typeText:    "запрос",
+			extraInView: "Поиск чатов, каналов и контактов",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testModel(t, nil)
+			m = tc.setup(m)
+			m = typeText(m, tc.typeText)
+
+			if got := stripANSI(m.bottomLine()); strings.Contains(got, tc.typeText) {
+				t.Errorf("bottomLine must not render %s input, got %q", tc.name, got)
+			}
+			view := stripANSI(m.View())
+			if !strings.Contains(view, tc.wantInView) {
+				t.Errorf("View must show typed %s text in the popup, got %q", tc.name, view)
+			}
+			if !strings.Contains(view, tc.extraInView) {
+				t.Errorf("View must show popup content %q, got %q", tc.extraInView, view)
+			}
+		})
 	}
 }
 
@@ -1537,6 +1692,225 @@ func TestPlayVoiceHotkeyNoMessageUnderCursor(t *testing.T) {
 	}
 }
 
+func photoTestModel(t *testing.T) Model {
+	t.Helper()
+	m := testModel(t, nil)
+	m.focus = focusMessages
+	m.messages = []auth.Message{{ID: 1, Text: photoPlaceholder, IsPhoto: true, PhotoFileID: 12345}}
+	m.messageCursor = 0
+	return m
+}
+
+func TestITerm2InlineImageSequence(t *testing.T) {
+	got := iTerm2InlineImage("aW1n", 40, 10)
+	want := "\x1b]1337;File=inline=1;width=40;height=10;preserveAspectRatio=1:aW1n\a"
+	if got != want {
+		t.Fatalf("iTerm2InlineImage()=%q, want %q", got, want)
+	}
+}
+
+func TestITerm2SupportRequiresExactTermProgram(t *testing.T) {
+	for _, termProgram := range []string{"", "iTerm2.app", "Apple_Terminal", "iterm.app"} {
+		if isITerm2(termProgram) {
+			t.Errorf("isITerm2(%q)=true, want false", termProgram)
+		}
+	}
+	if !isITerm2("iTerm.app") {
+		t.Error("isITerm2(iTerm.app)=false, want true")
+	}
+}
+
+func TestRenderMessageCardPhotoDegradesOutsideITerm2(t *testing.T) {
+	msg := auth.Message{ID: 1, SenderName: "Ирина", Text: photoPlaceholder, IsPhoto: true, PhotoFileID: 1, PhotoBase64: "aW1n"}
+	for _, termProgram := range []string{"", "Apple_Terminal"} {
+		t.Run(termProgram, func(t *testing.T) {
+			t.Setenv("TERM_PROGRAM", termProgram)
+			got := renderMessageCard(msg, 44, false, false, defaultTheme(), 0)
+			if !strings.Contains(got, photoPlaceholder) {
+				t.Fatalf("expected placeholder, got %q", got)
+			}
+			if strings.Contains(got, "\x1b]1337;File=") {
+				t.Fatalf("unexpected iTerm2 sequence outside iTerm2: %q", got)
+			}
+		})
+	}
+}
+
+func TestRenderMessageCardPhotoPlaceholderUntilDownloaded(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	msg := auth.Message{ID: 1, SenderName: "Ирина", Text: photoPlaceholder, IsPhoto: true, PhotoFileID: 1}
+	got := renderMessageCard(msg, 44, false, false, defaultTheme(), 0)
+	if !strings.Contains(got, photoPlaceholder) {
+		t.Fatalf("expected placeholder before download, got %q", got)
+	}
+	if strings.Contains(got, "\x1b]1337;File=") {
+		t.Fatalf("unexpected image sequence before download: %q", got)
+	}
+}
+
+func TestRenderMessageCardPhotoUsesInlineSequenceInITerm2(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	msg := auth.Message{ID: 1, SenderName: "Ирина", Text: photoPlaceholder, IsPhoto: true, PhotoFileID: 1, PhotoBase64: "aW1n"}
+	got := renderMessageCard(msg, 44, false, false, defaultTheme(), 0)
+	want := iTerm2InlineImage("aW1n", 40, 10)
+	if !strings.Contains(got, want) {
+		t.Fatalf("expected inline image sequence, got %q", got)
+	}
+	if strings.Contains(got, photoPlaceholder) {
+		t.Fatalf("did not expect placeholder after successful download: %q", got)
+	}
+}
+
+func TestRenderMessagesPhotoLineKeepsFeedWidth(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	msg := auth.Message{ID: 1, SenderName: "Ирина", Text: photoPlaceholder, IsPhoto: true, PhotoFileID: 1, PhotoBase64: "aW1n"}
+	sequence := iTerm2InlineImage("aW1n", 40, 10)
+	for _, tc := range []struct {
+		name       string
+		alignRight bool
+	}{
+		{"left", false},
+		{"right", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := renderMessages([]auth.Message{msg}, 60, tc.alignRight, 0, defaultTheme(), 0)
+			var imageLine string
+			for _, line := range strings.Split(got, "\n") {
+				if strings.Contains(line, sequence) {
+					imageLine = line
+					break
+				}
+			}
+			if imageLine == "" {
+				t.Fatalf("image sequence not found in output: %q", got)
+			}
+			physical := strings.Replace(imageLine, sequence, strings.Repeat(" ", 40), 1)
+			if width := lipgloss.Width(physical); width != 60 {
+				t.Fatalf("physical image line width=%d, want 60", width)
+			}
+		})
+	}
+}
+
+func TestPreviewPhotoHotkeyStartsDownloadInITerm2(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	m := photoTestModel(t)
+
+	m, cmd := updateModel(m, keyRune('p'))
+	if cmd == nil {
+		t.Fatal("expected non-nil photo download cmd")
+	}
+	if !m.loadingPhoto {
+		t.Error("expected loadingPhoto=true")
+	}
+	if !strings.Contains(m.status, "Загрузка фото") {
+		t.Errorf("expected loading status, got %q", m.status)
+	}
+}
+
+func TestPreviewPhotoHotkeyDegradesOutsideITerm2(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	m := photoTestModel(t)
+
+	m, cmd := updateModel(m, keyRune('p'))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd outside iTerm2, got %v", cmd)
+	}
+	if m.loadingPhoto {
+		t.Error("expected loadingPhoto=false")
+	}
+	if !strings.Contains(m.status, "только в iTerm2") {
+		t.Errorf("expected iTerm2-only status, got %q", m.status)
+	}
+}
+
+func TestPhotoFileMsgStoresPreviewAndRerenders(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	m := photoTestModel(t)
+	m.loadingPhoto = true
+
+	m, cmd := updateModel(m, photoFileMsg{messageID: 1, fileID: 12345, base64: "aW1n"})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd after photo load, got %v", cmd)
+	}
+	if m.loadingPhoto {
+		t.Error("expected loadingPhoto=false")
+	}
+	if m.messages[0].PhotoBase64 != "aW1n" {
+		t.Errorf("expected stored preview, got %q", m.messages[0].PhotoBase64)
+	}
+	if !strings.Contains(m.viewport.View(), "1337;File=") {
+		t.Error("expected rerendered viewport to contain inline image sequence")
+	}
+}
+
+func TestPhotoFileMsgDropsStaleSuccess(t *testing.T) {
+	m := photoTestModel(t)
+	m.loadingPhoto = true
+	m.status = "Загрузка фото…"
+	m.messages = []auth.Message{{ID: 2, Text: photoPlaceholder, IsPhoto: true, PhotoFileID: 2}}
+
+	m, cmd := updateModel(m, photoFileMsg{messageID: 1, fileID: 12345, base64: "aW1n"})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd for stale photo result, got %v", cmd)
+	}
+	if m.loadingPhoto {
+		t.Error("expected loadingPhoto=false")
+	}
+	if m.status != "" {
+		t.Errorf("expected stale result to clear loading status, got %q", m.status)
+	}
+	if m.messages[0].PhotoBase64 != "" {
+		t.Error("stale photo result must not modify current messages")
+	}
+}
+
+func TestPhotoFileMsgErrorSetsStatus(t *testing.T) {
+	m := testModel(t, nil)
+	m.loadingPhoto = true
+
+	m, cmd := updateModel(m, photoFileMsg{err: errors.New("download failed")})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on photo download error, got %v", cmd)
+	}
+	if m.loadingPhoto {
+		t.Error("expected loadingPhoto=false")
+	}
+	if !strings.Contains(m.status, "Ошибка скачивания фото") {
+		t.Errorf("expected photo download error status, got %q", m.status)
+	}
+}
+
+func TestPreviewPhotoCmdDownloadsAndEncodesFile(t *testing.T) {
+	path := t.TempDir() + "/photo.png"
+	if err := os.WriteFile(path, []byte("image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []map[string]interface{}{{
+		"@type": "file",
+		"local": map[string]interface{}{
+			"is_downloading_completed": true,
+			"path":                     path,
+		},
+	}}}
+	m := Model{ctx: context.Background(), client: client}
+	cmd := m.previewPhotoCmd(auth.Message{ID: 7, PhotoFileID: 42})
+
+	got, ok := cmd().(photoFileMsg)
+	if !ok {
+		t.Fatalf("unexpected command result type %T", got)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.messageID != 7 || got.fileID != 42 || got.base64 != "aW1hZ2U=" {
+		t.Fatalf("unexpected photoFileMsg: %+v", got)
+	}
+	if len(client.requests) != 1 || client.requests[0]["@type"] != "downloadFile" {
+		t.Fatalf("expected downloadFile request, got %+v", client.requests)
+	}
+}
+
 // TestVoiceFileMsgErrorSetsStatus — ошибка скачивания: статус, playingVoice
 // остаётся false.
 func TestVoiceFileMsgErrorSetsStatus(t *testing.T) {
@@ -1629,15 +2003,15 @@ func TestBottomLineShowsPlayingVoiceIndicator(t *testing.T) {
 	}
 }
 
-// TestBottomLineShowsVoiceHintInMessagesPanel — в нижней строке при фокусе на
-// панели сообщений присутствует пара хоткея "p" с меткой «голосовое».
-func TestBottomLineShowsVoiceHintInMessagesPanel(t *testing.T) {
+// TestBottomLineShowsMediaHintInMessagesPanel — в нижней строке при фокусе на
+// панели сообщений присутствует пара хоткея "p" с меткой «медиа».
+func TestBottomLineShowsMediaHintInMessagesPanel(t *testing.T) {
 	m := testModel(t, nil)
 	m.version = ""
 	m.focus = focusMessages
 
-	if got := m.bottomLine(); !strings.Contains(got, "голосовое") {
-		t.Errorf("expected voice hint in bottom line for focusMessages, got %q", got)
+	if got := m.bottomLine(); !strings.Contains(got, "медиа") {
+		t.Errorf("expected media hint in bottom line for focusMessages, got %q", got)
 	}
 }
 
@@ -2347,7 +2721,7 @@ func TestBottomLineNormalHintIsContextual(t *testing.T) {
 	search := []string{"поиск"}       // ключ "/" есть везде из-за "←/→", различаем по описанию
 	delete := []string{"удалить чат"} // ключ "d" проверяем отдельно ниже (mandatory, chats)
 	file := []string{"ctrl+f", "файл"}
-	voice := []string{"p", "голосовое"}
+	media := []string{"p", "медиа"}
 
 	for _, tc := range []struct {
 		name       string
@@ -2357,9 +2731,9 @@ func TestBottomLineNormalHintIsContextual(t *testing.T) {
 	}{
 		// В chats дополнительно проверяем наличие самих ключей "/" и "d" —
 		// «отсутствие» по ним не проверяем (см. комментарии выше).
-		{"folders", focusFolders, common, []string{"поиск", "удалить чат", "d", "ctrl+f", "файл", "p", "голосовое"}},
-		{"chats", focusChats, append(append(append(append([]string{}, common...), search...), delete...), "/", "d"), append(append([]string{}, file...), voice...)},
-		{"messages", focusMessages, append(append(append([]string{}, common...), file...), voice...), []string{"поиск", "удалить чат"}},
+		{"folders", focusFolders, common, []string{"поиск", "удалить чат", "d", "ctrl+f", "файл", "p", "медиа"}},
+		{"chats", focusChats, append(append(append(append([]string{}, common...), search...), delete...), "/", "d"), append(append([]string{}, file...), media...)},
+		{"messages", focusMessages, append(append(append([]string{}, common...), file...), media...), []string{"поиск", "удалить чат"}},
 	} {
 		m := testModel(t, nil)
 		m.version = ""
@@ -2920,7 +3294,8 @@ func TestEnterSendsMultilineMessage(t *testing.T) {
 // область ПОД всеми тремя панелями (bottomReserve/statusReserve не меняется по
 // режиму вовсе), а встроен чёрной областью внутрь единой рамки панели
 // сообщений: вьюпорт сжимается на paneFrameV (бордюр+паддинги единой рамки)
-// плюс высоту поля ввода composeCardHeight(), ставшую просто composeInput.Height().
+// плюс высоту поля ввода composeCardHeight() (высота textarea + 1 строка
+// отступа над текстом, 0048).
 func TestApplyLayoutShrinksBodyInInsertMode(t *testing.T) {
 	m := testModel(t, nil)
 	normalHeight := m.viewport.Height
@@ -3968,9 +4343,10 @@ func TestRerenderScrollsToCursorWhenAboveView(t *testing.T) {
 
 // TestRerenderScrollsToCursorWhenBelowView — симметрично: курсор уходит вниз
 // за пределы видимой области — viewport прокручивается вниз ровно настолько,
-// чтобы верхняя строка выбранной карточки стала последней видимой строкой
-// (либо YOffset == 0, если разница отрицательна — SetYOffset сама клампит,
-// тест естественно проходит в обоих случаях).
+// чтобы НИЗ выбранной карточки (её последняя строка) стал последней видимой
+// строкой (баг 0048: раньше равнялись только на начало карточки и её низ
+// оставался за кадром), либо YOffset == 0, если разница отрицательна —
+// SetYOffset сама клампит, тест естественно проходит в обоих случаях.
 func TestRerenderScrollsToCursorWhenBelowView(t *testing.T) {
 	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
 	m.viewport.Height = 5
@@ -3991,9 +4367,57 @@ func TestRerenderScrollsToCursorWhenBelowView(t *testing.T) {
 	// Курсор на последнем сообщении — оно ниже видимой области.
 	m.messageCursor = len(m.messages) - 1
 	m.rerenderMessagesAndScrollToCursor()
-	want := max(0, offsets[m.messageCursor]-m.viewport.Height+1)
+	end := strings.Count(content, "\n") // последняя строка контента = низ последней карточки
+	want := max(0, end-m.viewport.Height+1)
 	if m.viewport.YOffset != want {
-		t.Fatalf("expected YOffset %d, got %d", want, m.viewport.YOffset)
+		t.Fatalf("expected YOffset %d (bottom of last card visible), got %d", want, m.viewport.YOffset)
+	}
+	if m.viewport.YOffset+m.viewport.Height-1 < end {
+		t.Fatalf("down-scroll leaves bottom of last card out of frame: end=%d, last visible=%d",
+			end, m.viewport.YOffset+m.viewport.Height-1)
+	}
+	if m.viewport.YOffset > offsets[m.messageCursor] {
+		t.Fatalf("scrolled past the top of the selected card: YOffset %d > start %d",
+			m.viewport.YOffset, offsets[m.messageCursor])
+	}
+}
+
+// TestRerenderScrollShowsBottomOfMultiLineCard — красный тест бага 0048:
+// лента выше m.viewport.Height из НЕСКОЛЬКИХ многострочных карточек, курсор
+// дойдён стрелкой вниз до последнего сообщения. Старый код прокручивал вниз
+// только до НАЧАЛА карточки (offsets[cur]-Height+1 — верх карточки последней
+// видимой строкой) и низ многострочной карточки оставался за кадром; новый
+// код равняется на КОНЕЦ карточки (end), поэтому последняя строка (нижняя
+// рамка) последней карточки обязана быть видна: YOffset+Height-1 >= end.
+func TestRerenderScrollShowsBottomOfMultiLineCard(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+	m.viewport.Height = 8
+	m.messages = []auth.Message{
+		{ID: 1, SenderName: "А", Text: strings.Repeat("слово раз ", 20), Date: 100},
+		{ID: 2, SenderName: "Б", Text: strings.Repeat("слово два ", 25), Date: 101},
+		{ID: 3, SenderName: "Вы", Text: strings.Repeat("слово три ", 20), Date: 102, IsOutgoing: true},
+	}
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, offsets := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, len(m.messages)-1, defaultTheme(), 0)
+	m.viewport.SetContent(content)
+	m.viewport.SetYOffset(0)
+	if m.viewport.AtBottom() {
+		t.Fatal("test setup invalid: expected content taller than viewport")
+	}
+
+	// Стрелка вниз до последнего сообщения (последнее нажатие уже не меняет
+	// курсор — он на границе — но прокрутка всё равно должна перерисоваться).
+	m.messageCursor = len(m.messages) - 1
+	m.rerenderMessagesAndScrollToCursor()
+
+	start := offsets[m.messageCursor]
+	end := strings.Count(content, "\n") // последняя строка контента = нижняя рамка последней карточки
+	if m.viewport.YOffset+m.viewport.Height-1 < end {
+		t.Fatalf("bottom frame line of last card must be visible: end=%d, last visible=%d (YOffset=%d, Height=%d)",
+			end, m.viewport.YOffset+m.viewport.Height-1, m.viewport.YOffset, m.viewport.Height)
+	}
+	if m.viewport.YOffset > start {
+		t.Fatalf("scrolled past the top of the selected card: YOffset %d > start %d", m.viewport.YOffset, start)
 	}
 }
 
@@ -4837,8 +5261,10 @@ func TestPerChatDraftsAreIndependent(t *testing.T) {
 // TestMsgPaneInsertLayoutInvariant — единая рамка панели сообщений в
 // Insert-режиме: панель целиком шириной paneW и высотой paneRowHeight,
 // лента+чёрная область поля ввода ТОЧНО заполняют внутреннюю площадь
-// рамки (feedH+composeH == paneRowHeight-paneFrameV), и ни одна строка не
-// оставляет фоновых "дыр" в цвет панели (методика uncoveredCols из 0039).
+// рамки (feedH+composeH == paneRowHeight-paneFrameV, где composeH включает
+// строку отступа НАД текстом черновика — composeCardHeight, 0048), и ни одна
+// строка не оставляет фоновых "дыр" в цвет панели (методика uncoveredCols
+// из 0039).
 func TestMsgPaneInsertLayoutInvariant(t *testing.T) {
 	for _, tc := range []struct{ w, h int }{
 		{100, 30},
@@ -4871,14 +5297,16 @@ func TestMsgPaneInsertLayoutInvariant(t *testing.T) {
 				t.Fatalf("%dx%d row %d: uncovered columns %v (терминальный фон вместо цвета панели)", tc.w, tc.h, i, cols)
 			}
 		}
-		if m.viewport.Height+m.composeInput.Height() != m.paneRowHeight-paneFrameV {
+		if m.viewport.Height+m.composeCardHeight() != m.paneRowHeight-paneFrameV {
 			t.Fatalf("%dx%d: invariant broken: feedH(%d)+composeH(%d) != paneRowHeight(%d)-paneFrameV(%d)",
-				tc.w, tc.h, m.viewport.Height, m.composeInput.Height(), m.paneRowHeight, paneFrameV)
+				tc.w, tc.h, m.viewport.Height, m.composeCardHeight(), m.paneRowHeight, paneFrameV)
 		}
-		// чёрная область поля ввода — последние composeH строк контента рамки,
-		// все несут chromeBackground (0;0;0).
+		// чёрная область поля ввода — последние composeCardHeight() строк
+		// контента рамки (первая из них — пустой отступ над текстом), все
+		// несут chromeBackground (0;0;0).
 		feedH := m.viewport.Height
-		for r := 2 + feedH; r < 2+feedH+m.composeInput.Height(); r++ {
+		composeH := m.composeCardHeight()
+		for r := 2 + feedH; r < 2+feedH+composeH; r++ {
 			if !strings.Contains(lines[r], "48;2;0;0;0") {
 				t.Fatalf("%dx%d row %d: compose area must be solid chromeBackground, got %q", tc.w, tc.h, r, lines[r])
 			}

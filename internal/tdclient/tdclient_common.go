@@ -29,7 +29,6 @@ type Client struct {
 	chatTitleUpdates       chan map[string]interface{}
 	unreadCountUpdates     chan map[string]interface{}
 	unreadChatCountUpdates chan map[string]interface{}
-	fileUpdates            chan map[string]interface{}
 	nextExtra              int64
 	nextExtraMu            sync.Mutex
 	closed                 bool
@@ -71,10 +70,6 @@ func NewClient() *Client {
 		// Тот же паттерн, что у unreadCountUpdates — агрегат по чатам с
 		// непрочитанным (не по сообщениям), нужен для бейджей папок.
 		unreadChatCountUpdates: make(chan map[string]interface{}, 5),
-		// Апдейты о состоянии файлов (updateFile) приходят в ответ на
-		// изменения файлов, в т.ч. по ходу скачивания голосового —
-		// не частые, буфер по аналогии с chatFolderUpdates.
-		fileUpdates: make(chan map[string]interface{}, 5),
 	}
 	go c.receiveLoop()
 
@@ -218,18 +213,6 @@ func (c *Client) receiveLoop() {
 			// updateUnreadMessageCount).
 			select {
 			case c.unreadChatCountUpdates <- resp:
-			default:
-			}
-			continue
-		}
-
-		if updType, ok := resp["@type"].(string); ok && updType == "updateFile" {
-			// Тот же паттерн, что у chatFolderUpdates: неблокирующая отправка
-			// с дропом при переполнении. Скачивание голосового (задача 0041)
-			// ждёт готовый локальный путь файла через этот канал; до
-			// подписки избыточные апдейты просто отбрасываются.
-			select {
-			case c.fileUpdates <- resp:
 			default:
 			}
 			continue
@@ -408,10 +391,6 @@ func (c *Client) UnreadCountUpdates() <-chan map[string]interface{} {
 
 func (c *Client) UnreadChatCountUpdates() <-chan map[string]interface{} {
 	return c.unreadChatCountUpdates
-}
-
-func (c *Client) FileUpdates() <-chan map[string]interface{} {
-	return c.fileUpdates
 }
 
 func (c *Client) Close() {

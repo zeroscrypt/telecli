@@ -318,23 +318,88 @@ func TestParseMessageVoiceNoteMissingSizeKeepsVoiceNote(t *testing.T) {
 	}
 }
 
-func TestParseMessageNonVoiceKeepsPlaceholder(t *testing.T) {
-	msg := map[string]interface{}{
+func photoSize(fileID, width, height float64) map[string]interface{} {
+	return map[string]interface{}{
+		"@type":  "photoSize",
+		"type":   "x",
+		"width":  width,
+		"height": height,
+		"photo": map[string]interface{}{
+			"@type": "file",
+			"id":    fileID,
+		},
+	}
+}
+
+func photoMsgMap(sizes ...interface{}) map[string]interface{} {
+	return map[string]interface{}{
 		"@type":       "message",
 		"id":          float64(1),
 		"is_outgoing": true,
 		"date":        float64(100),
 		"content": map[string]interface{}{
 			"@type": "messagePhoto",
-			"photo": map[string]interface{}{},
+			"photo": map[string]interface{}{
+				"@type": "photo",
+				"sizes": sizes,
+			},
 		},
 	}
+}
+
+func TestParseMessagePhotoSelectsLargestArea(t *testing.T) {
+	msg := photoMsgMap(
+		photoSize(100, 10, 100),
+		photoSize(200, 80, 80),
+		photoSize(300, 100, 20),
+	)
+
 	got := parseMessage(context.Background(), nil, msg)
-	if got.IsVoiceNote {
-		t.Error("expected IsVoiceNote=false for non-voice content")
+	if !got.IsPhoto {
+		t.Fatal("expected IsPhoto=true")
 	}
-	if got.Text != "[тип сообщения: messagePhoto]" {
-		t.Errorf("expected non-voice placeholder, got %q", got.Text)
+	if got.IsVoiceNote {
+		t.Error("expected IsVoiceNote=false")
+	}
+	if got.PhotoFileID != 200 {
+		t.Errorf("expected PhotoFileID=200, got %d", got.PhotoFileID)
+	}
+	if got.Text != "[фото]" {
+		t.Errorf("expected photo placeholder, got %q", got.Text)
+	}
+}
+
+func TestPhotoInfoSkipsMalformedSizes(t *testing.T) {
+	msg := photoMsgMap(
+		"broken",
+		map[string]interface{}{"width": float64(100), "height": float64(100)},
+		photoSize(0, 100, 100),
+		photoSize(1, 0, 100),
+		photoSize(2, 100, 0),
+		photoSize(3, 4, 5),
+	)
+
+	fileID, ok := photoInfo(msg)
+	if !ok || fileID != 3 {
+		t.Fatalf("photoInfo=(%d, %v), want (3, true)", fileID, ok)
+	}
+}
+
+func TestParseMessageDegradedPhotoKeepsPlaceholder(t *testing.T) {
+	cases := []map[string]interface{}{
+		{"@type": "message", "is_outgoing": true},
+		{"@type": "message", "is_outgoing": true, "content": map[string]interface{}{"@type": "messagePhoto"}},
+		{"@type": "message", "is_outgoing": true, "content": map[string]interface{}{"@type": "messagePhoto", "photo": map[string]interface{}{}}},
+		photoMsgMap(),
+	}
+	for i, raw := range cases {
+		got := parseMessage(context.Background(), nil, raw)
+		if got.IsPhoto || got.PhotoFileID != 0 {
+			t.Errorf("case %d: expected zero photo fields, got photo=%t id=%d", i, got.IsPhoto, got.PhotoFileID)
+		}
+		if got.Text != "[тип сообщения: messagePhoto]" && got.Text != "" {
+			t.Errorf("case %d: expected generic photo placeholder, got %q", i, got.Text)
+		}
 	}
 }
 
