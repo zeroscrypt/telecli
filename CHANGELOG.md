@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/zeroscrypt/telecli/compare/v1.2.0...v1.3.0) (2026-09-24)
+
+
+### Features
+
+* voice playback, live-check bugfixes, inline compose with per-chat drafts ([f98dbb7](https://github.com/zeroscrypt/telecli/commit/f98dbb7d227c15b0fb7fe21682c0f1821a664486))
+
 ## [1.2.0](https://github.com/zeroscrypt/telecli/compare/v1.1.2...v1.2.0) (2026-09-23)
 
 
