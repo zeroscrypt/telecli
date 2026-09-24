@@ -80,6 +80,22 @@ func ParseChatReadOutboxUpdate(update map[string]interface{}) (chatID int64, las
 	return int64(id), int64(msgID), true
 }
 
+// ParseChatTitleUpdate разбирает updateChatTitle — новое название чата. Для
+// приватных чатов это имя собеседника, которое приходит ПОСЛЕ асинхронного
+// резолва пользователя: в момент getChat title может быть ещё пустым (см.
+// задачу 0045), реальное имя доставляет именно этот апдейт.
+func ParseChatTitleUpdate(update map[string]interface{}) (chatID int64, title string, ok bool) {
+	if update["@type"] != "updateChatTitle" {
+		return 0, "", false
+	}
+	id, idOk := update["chat_id"].(float64)
+	title, titleOk := update["title"].(string)
+	if !idOk || !titleOk {
+		return 0, "", false
+	}
+	return int64(id), title, true
+}
+
 // ParseUnreadMessageCountUpdate разбирает updateUnreadMessageCount —
 // агрегированное количество НЕПРОЧИТАННЫХ СООБЩЕНИЙ (не чатов!) по ЦЕЛОМУ
 // списку чатов. Берётся unread_count (ВКЛЮЧАЯ замьюченные чаты) — по живой

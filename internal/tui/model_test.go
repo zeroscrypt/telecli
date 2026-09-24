@@ -52,6 +52,7 @@ type fakeClient struct {
 	// UnreadChatCountUpdates(), по аналогии с folderCh.
 	chatReadInboxCh   chan map[string]interface{}
 	chatReadOutboxCh  chan map[string]interface{}
+	chatTitleCh       chan map[string]interface{}
 	unreadCountCh     chan map[string]interface{}
 	unreadChatCountCh chan map[string]interface{}
 	requests          []map[string]interface{}
@@ -90,6 +91,10 @@ func (f *fakeClient) ChatReadOutboxUpdates() <-chan map[string]interface{} {
 	return f.chatReadOutboxCh
 }
 
+func (f *fakeClient) ChatTitleUpdates() <-chan map[string]interface{} {
+	return f.chatTitleCh
+}
+
 func (f *fakeClient) UnreadCountUpdates() <-chan map[string]interface{} {
 	return f.unreadCountCh
 }
@@ -97,6 +102,8 @@ func (f *fakeClient) UnreadCountUpdates() <-chan map[string]interface{} {
 func (f *fakeClient) UnreadChatCountUpdates() <-chan map[string]interface{} {
 	return f.unreadChatCountCh
 }
+
+func (f *fakeClient) FileUpdates() <-chan map[string]interface{} { return nil }
 
 func (f *fakeClient) Close() {}
 
@@ -695,6 +702,32 @@ func TestBottomLineBackgroundsContiguous(t *testing.T) {
 			}
 			if cols := uncoveredCols(line); len(cols) > 0 {
 				t.Errorf("bottomLine (%s): uncovered columns %v (фон терминала): %q", name, cols, line)
+			}
+		}
+	}
+}
+
+// Тест бага 0042 живой проверки: фон хрома не покрывал :help/t (about) экраны
+// целиком — строки там собраны из НЕСКОЛЬКИХ Render(...)-фрагментов подряд
+// (заголовок, keyLine в help, баннер в about), и фон внешнего paneBox
+// переживал только первый вложенный \x1b[0m. Проверка — тем же механизмом
+// uncoveredCols, что в задачах 0039: ни одна колонка ни одной строки не должна
+// остаться без фона.
+func TestHelpAboutBackgroundsContiguous(t *testing.T) {
+	m := New(&fakeClient{}, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 100})
+	m.version = "v0.5.0"
+
+	for name, s := range map[string]string{
+		"help":  m.helpScreen(),
+		"about": m.aboutScreen(),
+	} {
+		for i, line := range strings.Split(s, "\n") {
+			if line == "" {
+				continue
+			}
+			if cols := uncoveredCols(line); len(cols) > 0 {
+				t.Errorf("%s line %d: uncovered columns %v (фон терминала): %q", name, i, cols, line)
 			}
 		}
 	}
@@ -1427,6 +1460,187 @@ func TestSendMessageFailureKeepsDraftAndReturnsError(t *testing.T) {
 	}
 }
 
+// voiceTestModel возвращает модель в focusMessages с одним голосовым
+// сообщением под курсором.
+func voiceTestModel(t *testing.T) Model {
+	t.Helper()
+	m := testModel(t, nil)
+	m.focus = focusMessages
+	m.messages = []auth.Message{{ID: 1, Text: "▶ голосовое [1:05]", IsVoiceNote: true, VoiceFileID: 12345, VoiceDuration: 65}}
+	m.messageCursor = 0
+	return m
+}
+
+// TestPlayVoiceHotkeyStartsDownloadCmd — p на голосовом под курсором
+// возвращает не-nil команду (саму команду не выполняем: она блокируется на
+// ожидании файла), статус-ошибки нет.
+func TestPlayVoiceHotkeyStartsDownloadCmd(t *testing.T) {
+	m := voiceTestModel(t)
+
+	m, cmd := updateModel(m, keyRune('p'))
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd for voice note under cursor")
+	}
+	if m.status != "" {
+		t.Errorf("expected no status error, got %q", m.status)
+	}
+}
+
+// TestPlayVoiceHotkeyNonVoiceMessage — p на обычном сообщении: статус про
+// не-голосовое, команды нет.
+func TestPlayVoiceHotkeyNonVoiceMessage(t *testing.T) {
+	m := testModel(t, nil)
+	m.focus = focusMessages
+	m.messages = []auth.Message{{ID: 1, Text: "обычное", IsOutgoing: true}}
+	m.messageCursor = 0
+
+	m, cmd := updateModel(m, keyRune('p'))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on non-voice message, got %v", cmd)
+	}
+	if !strings.Contains(m.status, "не голосовое") {
+		t.Errorf("expected status about non-voice message, got %q", m.status)
+	}
+}
+
+// TestPlayVoiceHotkeyWrongFocus — p вне панели сообщений: статус про панель,
+// команды нет.
+func TestPlayVoiceHotkeyWrongFocus(t *testing.T) {
+	m := testModel(t, nil)
+	m.focus = focusChats
+	m.messages = []auth.Message{{ID: 1, IsVoiceNote: true, VoiceFileID: 1}}
+	m.messageCursor = 0
+
+	m, cmd := updateModel(m, keyRune('p'))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd outside messages panel, got %v", cmd)
+	}
+	if !strings.Contains(m.status, "только в панели сообщений") {
+		t.Errorf("expected status about messages panel, got %q", m.status)
+	}
+}
+
+// TestPlayVoiceHotkeyNoMessageUnderCursor — пустая лента/вырожденный курсор:
+// статус, команды нет.
+func TestPlayVoiceHotkeyNoMessageUnderCursor(t *testing.T) {
+	m := testModel(t, nil)
+	m.focus = focusMessages
+	m.messages = nil
+	m.messageCursor = -1
+
+	m, cmd := updateModel(m, keyRune('p'))
+	if cmd != nil {
+		t.Fatalf("expected nil cmd without message under cursor, got %v", cmd)
+	}
+	if !strings.Contains(m.status, "нет сообщения под курсором") {
+		t.Errorf("expected status about missing message, got %q", m.status)
+	}
+}
+
+// TestVoiceFileMsgErrorSetsStatus — ошибка скачивания: статус, playingVoice
+// остаётся false.
+func TestVoiceFileMsgErrorSetsStatus(t *testing.T) {
+	m := testModel(t, nil)
+
+	m, cmd := updateModel(m, voiceFileMsg{err: errors.New("download failed")})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on download error, got %v", cmd)
+	}
+	if m.playingVoice {
+		t.Error("expected playingVoice=false on download error")
+	}
+	if !strings.Contains(m.status, "Ошибка скачивания голосового") {
+		t.Errorf("expected download error status, got %q", m.status)
+	}
+}
+
+// TestVoiceFileMsgSuccessStartsPlayer — файл скачан: playingVoice=true и
+// возвращается команда запуска плеера (не выполняем — она идёт в child-режим).
+func TestVoiceFileMsgSuccessStartsPlayer(t *testing.T) {
+	m := testModel(t, nil)
+
+	m, cmd := updateModel(m, voiceFileMsg{fileID: 1, path: "/tmp/x", err: nil})
+	if cmd == nil {
+		t.Fatal("expected non-nil player command after download")
+	}
+	if !m.playingVoice {
+		t.Error("expected playingVoice=true after successful download")
+	}
+}
+
+// TestVoicePlayFinishedMsgNilErr — плеер завершился без ошибки: флаг снят,
+// статус пустой.
+func TestVoicePlayFinishedMsgNilErr(t *testing.T) {
+	m := voiceTestModel(t)
+	m.playingVoice = true
+
+	m, cmd := updateModel(m, voicePlayFinishedMsg{err: nil})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd after playback finished, got %v", cmd)
+	}
+	if m.playingVoice {
+		t.Error("expected playingVoice=false after playback finished")
+	}
+	if m.status != "" {
+		t.Errorf("expected empty status after clean playback, got %q", m.status)
+	}
+}
+
+// TestVoicePlayFinishedMsgError — плеер упал: флаг снят, статус про ошибку.
+func TestVoicePlayFinishedMsgError(t *testing.T) {
+	m := voiceTestModel(t)
+	m.playingVoice = true
+
+	m, cmd := updateModel(m, voicePlayFinishedMsg{err: errors.New("player crashed")})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd after playback error, got %v", cmd)
+	}
+	if m.playingVoice {
+		t.Error("expected playingVoice=false after playback error")
+	}
+	if !strings.Contains(m.status, "Ошибка воспроизведения") {
+		t.Errorf("expected playback error status, got %q", m.status)
+	}
+}
+
+// TestPlaybackHintSuffix — индикатор воспроизведения: пуст, когда не играет,
+// содержит ▶, когда играет.
+func TestPlaybackHintSuffix(t *testing.T) {
+	if got := playbackHintSuffix(false); got != "" {
+		t.Errorf("expected empty suffix when not playing, got %q", got)
+	}
+	if got := playbackHintSuffix(true); !strings.Contains(got, "▶") {
+		t.Errorf("expected ▶ in suffix when playing, got %q", got)
+	}
+}
+
+// TestBottomLineShowsPlayingVoiceIndicator — индикатор идущего воспроизведения
+// появляется в нижней строке в Normal-режиме и отсутствует, когда не играет.
+func TestBottomLineShowsPlayingVoiceIndicator(t *testing.T) {
+	m := testModel(t, nil)
+	m.version = ""
+
+	if got := m.bottomLine(); strings.Contains(got, "воспроизведение") {
+		t.Errorf("did not expect playback indicator when not playing, got %q", got)
+	}
+	m.playingVoice = true
+	if got := m.bottomLine(); !strings.Contains(got, "▶ воспроизведение") {
+		t.Errorf("expected playback indicator while playing, got %q", got)
+	}
+}
+
+// TestBottomLineShowsVoiceHintInMessagesPanel — в нижней строке при фокусе на
+// панели сообщений присутствует пара хоткея "p" с меткой «голосовое».
+func TestBottomLineShowsVoiceHintInMessagesPanel(t *testing.T) {
+	m := testModel(t, nil)
+	m.version = ""
+	m.focus = focusMessages
+
+	if got := m.bottomLine(); !strings.Contains(got, "голосовое") {
+		t.Errorf("expected voice hint in bottom line for focusMessages, got %q", got)
+	}
+}
+
 // TestInsertEnterEmptyDraftStaysInInsertWithoutSending — Enter на пустом (или
 // только из пробелов) черновике остаётся в Insert-режиме и не отправляет:
 // Enter зарезервирован под отправку и не закрывает режим сам по себе
@@ -1855,6 +2069,78 @@ func TestCollapseHotkeyAdjustsViewportWidth(t *testing.T) {
 	}
 }
 
+// TestCollapseHotkeyRepaintsMessageContent — сворачивание панели хоткеем
+// '1'/'2' меняет эффективную ширину ленты, и уже загруженный контент обязан
+// перерисоваться (перепектись) под новую ширину. Без этого лента остаётся
+// "запечённой" под старую ширину: текст перенесён по старому, более узкому
+// тракту, а новые освободившиеся колонки справа недорисованы (0043).
+// Проверка — число строк в хранимом контенте (viewport.TotalLineCount):
+// узкая ширина даёт больше переносов, широкая — меньше; свежий контент
+// после сворачивания обязан совпасть с эталонным рендером под НОВУЮ ширину,
+// а не остаться с числом строк от старой.
+func TestCollapseHotkeyRepaintsMessageContent(t *testing.T) {
+	longText := "одно два три четыре пять шесть семь восемь девять десять"
+	m := testModel(t, nil)
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 70, Height: 30})
+	m.displayedChat = 111
+	m.messages = []auth.Message{{ID: 1, SenderName: "Вы", Text: longText, Date: 100}}
+	m.messageCursor = 0
+
+	// Имитация уже открытой ленты (тот же путь, что в messagesLoadedMsg):
+	// контент печётся под ширину ДО сворачивания панели.
+	m.applyLayout()
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, _ := renderMessages(m.messages, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
+	m.viewport.SetContent(content)
+	staleLines := m.viewport.TotalLineCount()
+
+	// Хоткей '1' со сворачиванием панели папок: лента становится шире на
+	// foldersPaneW-collapsedPaneW — контент обязан перерисоваться под новую
+	// ширину (строк меньше, чем под старую).
+	m, _ = updateModel(m, keyRune('1'))
+	if !m.foldersCollapsed {
+		t.Fatal("'1' with focusFolders must collapse folders pane")
+	}
+	assertMessageContentRepainted(t, m, "после '1'", staleLines)
+
+	// Панель чатов: разворачиваем папки обратно, сворачиваем чаты хоткеем '2'.
+	m, _ = updateModel(m, keyRune('1')) // развернуть папки (фокус остался там)
+	if m.foldersCollapsed {
+		t.Fatal("'1' again with focusFolders must expand folders pane")
+	}
+	stale2 := m.viewport.TotalLineCount() // контент снова под шириной с обоими развёрнутыми панелями
+	m.focus = focusChats
+	m, _ = updateModel(m, keyRune('2'))
+	if !m.chatsCollapsed {
+		t.Fatal("'2' with focusChats must collapse chats pane")
+	}
+	assertMessageContentRepainted(t, m, "после '2'", stale2)
+}
+
+// assertMessageContentRepainted — свежий контент ленты обязан совпасть по
+// числу строк с эталонным рендером под ТЕКУЩУЮ ширину m.viewport (перепекли
+// контент) и быть короче запечённого под старую, более узкую ширину.
+func assertMessageContentRepainted(t *testing.T, m Model, label string, staleLines int) {
+	t.Helper()
+	got := m.viewport.TotalLineCount()
+	want := referenceMessageLineCount(m, m.messages)
+	if want >= staleLines {
+		t.Fatalf("%s: эталонный перенос под новую ширину обязан быть короче старого, stale=%d fresh=%d — тест не различает ширины", label, staleLines, want)
+	}
+	if got != want {
+		t.Errorf("%s: лента не перерисована под новую ширину: viewport хранит %d строк, эталон под новой шириной — %d (было %d до сворачивания)", label, got, want, staleLines)
+	}
+}
+
+// referenceMessageLineCount — сколько строк вернул бы renderMessages под
+// текущую ширину m.viewport: эталон "свежего" контента для сверки с
+// хранимым в viewport.
+func referenceMessageLineCount(m Model, msgs []auth.Message) int {
+	contentWidth := max(0, m.viewport.Width-m.viewport.Style.GetHorizontalFrameSize())
+	content, _ := renderMessages(msgs, contentWidth, m.settings.AlignOwnRight, m.messageCursor, m.theme, m.chatReadOutbox[m.displayedChat])
+	return strings.Count(content, "\n") + 1
+}
+
 // TestCollapsedPaneTitleHeader — заголовок свёрнутой панели: только "[N]"
 // (те же аргументы paneTitle, что использует View() для свёрнутого вида), без
 // названия и без scroll-индикатора.
@@ -1913,14 +2199,18 @@ func TestCollapsedPanelInView(t *testing.T) {
 
 // TestCollapsedPaneBodyVerticalName — тело свёрнутой панели: первая строка
 // содержимого пустая, дальше — по одной букве капсом на строку в исходном
-// порядке (каждая строка добита до collapsedPaneContentW пробелами).
+// порядке. Каждая строка добита до collapsedPaneContentW и буквы
+// ЦЕНТРИРОВАНЫ по горизонтали (0046): при collapsedPaneContentW=3 буква ровно
+// посередине — пробел-буква-пробел (" Ч "), а не прижата к левому краю
+// ("Ч  "). Сравниваем точные строки — это явно ловит отсутствие окружения
+// пробелами с обеих сторон.
 func TestCollapsedPaneBodyVerticalName(t *testing.T) {
 	tests := []struct {
 		name string
 		want []string
 	}{
-		{"Чаты", []string{"", "Ч", "А", "Т", "Ы"}},
-		{"Folders", []string{"", "F", "O", "L", "D", "E", "R", "S"}},
+		{"Чаты", []string{"   ", " Ч ", " А ", " Т ", " Ы "}},
+		{"Folders", []string{"   ", " F ", " O ", " L ", " D ", " E ", " R ", " S "}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1930,8 +2220,8 @@ func TestCollapsedPaneBodyVerticalName(t *testing.T) {
 				t.Fatalf("collapsedPaneBody(%q, 20) = %d lines, want %d: %q", tc.name, len(lines), len(tc.want), got)
 			}
 			for i := range tc.want {
-				if trimmed := strings.TrimRight(lines[i], " "); trimmed != tc.want[i] {
-					t.Errorf("line %d = %q, want %q", i, lines[i], tc.want[i])
+				if lines[i] != tc.want[i] {
+					t.Errorf("line %d = %q, want centered %q (letter must be surrounded by spaces)", i, lines[i], tc.want[i])
 				}
 			}
 		})
@@ -1987,6 +2277,45 @@ func TestCollapsedPaneTitleWidthMatchesPaneWidth(t *testing.T) {
 	}
 }
 
+// TestCollapsedPaneBoxWidthNoPadding — свёрнутая панель (collapsedPaneBox)
+// рисуется БЕЗ внутреннего паддинга: итоговая ширина ровно
+// collapsedPaneContentW+2 (рамка 2 + контент 3), а не
+// collapsedPaneContentW+2+2*panePaddingH, как было с общим paneBox (0044, по
+// прямому запросу человека — панель должна быть максимально узкой). Рамка не
+// должна рваться: каждая строка рендера одной фиксированной ширины.
+func TestCollapsedPaneBoxWidthNoPadding(t *testing.T) {
+	th := defaultTheme()
+	body := collapsedPaneBody("Папки", 3) // реальное тело свёрнутой панели
+	for _, focused := range []bool{false, true} {
+		t.Run("focused="+strconv.FormatBool(focused), func(t *testing.T) {
+			rendered := collapsedPaneBox(collapsedPaneW, 10, body, focused, th, 1)
+			lines := strings.Split(rendered, "\n")
+			if len(lines) == 0 {
+				t.Fatalf("collapsedPaneBox returned no lines: %q", rendered)
+			}
+			for i, line := range lines {
+				if w := lipgloss.Width(line); w != collapsedPaneW {
+					t.Errorf("line %d width = %d, want collapsedPaneW %d: %q", i, w, collapsedPaneW, line)
+				}
+			}
+			if collapsedPaneW != collapsedPaneContentW+2 {
+				t.Errorf("collapsedPaneW = %d, want collapsedPaneContentW+2 = %d", collapsedPaneW, collapsedPaneContentW+2)
+			}
+		})
+	}
+
+	// Тот же контент в общем paneBox шире ровно на отсутствующий паддинг:
+	// свёрнутая панель на 2*panePaddingH уже при той же рамке и содержимом.
+	collapsed := strings.SplitN(collapsedPaneBox(collapsedPaneW, 10, "АБВ", false, th, 1), "\n", 2)[0]
+	padded := strings.SplitN(paneBox(collapsedPaneW+2*panePaddingH, 10, "АБВ", false, th, 1), "\n", 2)[0]
+	if got, want := lipgloss.Width(collapsed), collapsedPaneContentW+2; got != want {
+		t.Errorf("collapsedPaneBox width = %d, want %d", got, want)
+	}
+	if got, want := lipgloss.Width(padded), collapsedPaneContentW+2+2*panePaddingH; got != want {
+		t.Errorf("paneBox (padded) width = %d, want %d", got, want)
+	}
+}
+
 // Статус-строка Normal-режима без статуса — логотип "TELECLi" + синяя метка
 // "NAV" + тусклая подсказка (вместо прежнего "-- NORMAL --"/"NORMAL"-пилюли).
 func TestBottomLineNormalModeShowsPill(t *testing.T) {
@@ -2018,6 +2347,7 @@ func TestBottomLineNormalHintIsContextual(t *testing.T) {
 	search := []string{"поиск"}       // ключ "/" есть везде из-за "←/→", различаем по описанию
 	delete := []string{"удалить чат"} // ключ "d" проверяем отдельно ниже (mandatory, chats)
 	file := []string{"ctrl+f", "файл"}
+	voice := []string{"p", "голосовое"}
 
 	for _, tc := range []struct {
 		name       string
@@ -2027,9 +2357,9 @@ func TestBottomLineNormalHintIsContextual(t *testing.T) {
 	}{
 		// В chats дополнительно проверяем наличие самих ключей "/" и "d" —
 		// «отсутствие» по ним не проверяем (см. комментарии выше).
-		{"folders", focusFolders, common, []string{"поиск", "удалить чат", "d", "ctrl+f", "файл"}},
-		{"chats", focusChats, append(append(append(append([]string{}, common...), search...), delete...), "/", "d"), file},
-		{"messages", focusMessages, append(append([]string{}, common...), file...), []string{"поиск", "удалить чат"}},
+		{"folders", focusFolders, common, []string{"поиск", "удалить чат", "d", "ctrl+f", "файл", "p", "голосовое"}},
+		{"chats", focusChats, append(append(append(append([]string{}, common...), search...), delete...), "/", "d"), append(append([]string{}, file...), voice...)},
+		{"messages", focusMessages, append(append(append([]string{}, common...), file...), voice...), []string{"поиск", "удалить чат"}},
 	} {
 		m := testModel(t, nil)
 		m.version = ""
@@ -2586,17 +2916,18 @@ func TestEnterSendsMultilineMessage(t *testing.T) {
 
 // TestApplyLayoutShrinksBodyInInsertMode — вход в Insert-режим уменьшает высоту
 // viewport ровно на разницу бюджетов (composeAreaHeight+1 вместо statusReserve).
-// По правке человека — черновик больше не резервирует отдельную область
-// ПОД всеми тремя панелями (bottomReserve/statusReserve не меняется по
-// режиму вовсе), а встроен КАРТОЧКОЙ внутрь самой панели сообщений: её
-// вьюпорт сжимается ровно на composeCardHeight() (рамка+высота черновика).
+// По правке человека (задача 0047) черновик больше не резервирует отдельную
+// область ПОД всеми тремя панелями (bottomReserve/statusReserve не меняется по
+// режиму вовсе), а встроен чёрной областью внутрь единой рамки панели
+// сообщений: вьюпорт сжимается на paneFrameV (бордюр+паддинги единой рамки)
+// плюс высоту поля ввода composeCardHeight(), ставшую просто composeInput.Height().
 func TestApplyLayoutShrinksBodyInInsertMode(t *testing.T) {
 	m := testModel(t, nil)
 	normalHeight := m.viewport.Height
 
 	m.displayedChat = 111
 	m, _ = updateModel(m, keyRune('i'))
-	want := normalHeight - m.composeCardHeight()
+	want := normalHeight - paneFrameV - m.composeCardHeight()
 	if m.viewport.Height != want {
 		t.Fatalf("expected viewport.Height %d in insert mode, got %d", want, m.viewport.Height)
 	}
@@ -3710,6 +4041,16 @@ func rawChatReadInboxUpdate(chatID float64, unreadCount float64) map[string]inte
 	}
 }
 
+// rawChatTitleUpdate строит "сырой" TDLib-апдейт updateChatTitle (настоящее
+// имя приватного чата после асинхронного резолва собеседника).
+func rawChatTitleUpdate(chatID float64, title string) map[string]interface{} {
+	return map[string]interface{}{
+		"@type":   "updateChatTitle",
+		"chat_id": chatID,
+		"title":   title,
+	}
+}
+
 // rawUnreadCountUpdate строит "сырой" апдейт updateUnreadMessageCount для
 // chatListFolder (folderID) или chatListMain (folderID < 0 → main).
 func rawUnreadCountUpdate(folderID int, unreadCount float64) map[string]interface{} {
@@ -3803,6 +4144,71 @@ func TestChatReadInboxUpdateMsgInvalidStillResubscribes(t *testing.T) {
 func TestChatReadInboxUpdateMsgClosedStopsResubscribing(t *testing.T) {
 	m := testModel(t, []auth.Chat{{ID: 1, Title: "А"}})
 	m, resub := updateModel(m, chatReadInboxUpdateMsg{closed: true})
+	if resub != nil {
+		t.Fatal("closed channel must not resubscribe, expected nil cmd")
+	}
+}
+
+// TestWaitForChatTitleUpdateUpdatesMatchingChat — живой апдейт updateChatTitle
+// через канал заменяет title у совпадающего чата и переподписывается
+// (настоящее имя приватного чата приходит после асинхронного резолва
+// собеседника — в момент getChat title был пустым, см. задачу 0045).
+func TestWaitForChatTitleUpdateUpdatesMatchingChat(t *testing.T) {
+	fake := &fakeClient{chatTitleCh: make(chan map[string]interface{}, 1)}
+	m := New(fake, context.Background(), config.DefaultKeyBindings(), config.DefaultSettings(), "dev")
+	m, _ = updateModel(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.chats = []auth.Chat{
+		{ID: 1, Title: "chat#1"},
+		{ID: 2, Title: "chat#2"},
+	}
+
+	cmd := m.waitForChatTitleUpdate()
+	fake.chatTitleCh <- rawChatTitleUpdate(2, "Иван Петров")
+	msg := cmd()
+
+	m, resub := updateModel(m, msg)
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd after live update")
+	}
+	if m.chats[0].Title != "chat#1" {
+		t.Errorf("chat 1 must not change, got %q", m.chats[0].Title)
+	}
+	if m.chats[1].Title != "Иван Петров" {
+		t.Errorf("expected chat 2 Title \"Иван Петров\", got %q", m.chats[1].Title)
+	}
+}
+
+// TestChatTitleUpdateMsgIgnoresUnknownChat — валидный апдейт для чата, которого
+// нет в списке, безвреден и всё равно переподписывается.
+func TestChatTitleUpdateMsgIgnoresUnknownChat(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "А"}})
+	m, resub := updateModel(m, chatTitleUpdateMsg{chatID: 999, title: "Иван", valid: true})
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd for unknown chat")
+	}
+	if m.chats[0].Title != "А" {
+		t.Errorf("unknown chat must not touch existing chats, got %q", m.chats[0].Title)
+	}
+}
+
+// TestChatTitleUpdateMsgInvalidStillResubscribes — нераспознанный апдейт
+// (valid == false) не портит данные и всё равно переподписывается.
+func TestChatTitleUpdateMsgInvalidStillResubscribes(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "А"}})
+	m, resub := updateModel(m, chatTitleUpdateMsg{})
+	if resub == nil {
+		t.Fatal("expected non-nil resubscription cmd for invalid update")
+	}
+	if m.chats[0].Title != "А" {
+		t.Errorf("invalid update must not change Title, got %q", m.chats[0].Title)
+	}
+}
+
+// TestChatTitleUpdateMsgClosedStopsResubscribing — закрытый канал —
+// единственный случай без переподписки.
+func TestChatTitleUpdateMsgClosedStopsResubscribing(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 1, Title: "А"}})
+	m, resub := updateModel(m, chatTitleUpdateMsg{closed: true})
 	if resub != nil {
 		t.Fatal("closed channel must not resubscribe, expected nil cmd")
 	}
@@ -4344,5 +4750,138 @@ func TestChatActionDoneMsgClosesDisplayedChat(t *testing.T) {
 	}
 	if m.status != "Готово" {
 		t.Fatalf("expected status Готово, got %q", m.status)
+	}
+}
+
+// TestPerChatDraftsAreIndependent — в задаче 0047 введены отдельные черновики
+// для каждого открытого чата: смена чата сохраняет текст одного и загружает
+// черновик другого (пусто, если его ещё нет), возврат в исходный чат
+// восстанавливает его текст. Реальные клавиши, не прямой вызов
+// switchDisplayedChat.
+func TestPerChatDraftsAreIndependent(t *testing.T) {
+	m := testModel(t, []auth.Chat{{ID: 111, Title: "A"}, {ID: 222, Title: "B"}, {ID: 333, Title: "C"}})
+	m.focus = focusChats
+	m.chatCursor = 0
+
+	selectChatAt := func(cur int) Model {
+		m.chatCursor = cur
+		m2, cmd := updateModel(m, tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("expected non-nil cmd after selecting chat")
+		}
+		runCmd(t, cmd)
+		return m2
+	}
+
+	// Чаты переключаются только из списка: из Insert выходим Esc (в Normal,
+	// текст черновика НЕ чистится — см. ветку KeyEsc в modeInsert), ещё раз
+	// Esc назад в focusChats.
+	m = selectChatAt(0) // A (111)
+	if m.displayedChat != 111 {
+		t.Fatalf("expected displayedChat 111, got %d", m.displayedChat)
+	}
+	m.focus = focusMessages
+	m, _ = updateModel(m, keyRune('i'))
+	m = typeText(m, "черновик для A")
+	if got := m.composeInput.Value(); got != "черновик для A" {
+		t.Fatalf("expected draft A typed, got %q", got)
+	}
+
+	// Переключаемся на B (222) — черновик A должен сохраниться.
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc}) // Insert → Normal
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc}) // focusMessages → focusChats
+	m = selectChatAt(1)                                 // B (222)
+	if m.displayedChat != 222 {
+		t.Fatalf("expected displayedChat 222, got %d", m.displayedChat)
+	}
+	if got := m.composeInput.Value(); got != "" {
+		t.Fatalf("expected empty draft for B, got %q", got)
+	}
+	if _, ok := m.chatDrafts[111]; !ok {
+		t.Fatalf("expected draft for chat A saved on switch")
+	}
+
+	// Набираем черновик для B.
+	m.focus = focusMessages
+	m, _ = updateModel(m, keyRune('i'))
+	m = typeText(m, "черновик для B")
+
+	// Переключаемся на C (333) — черновик B сохраняется, у C пусто.
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = selectChatAt(2) // C (333)
+	if m.displayedChat != 333 {
+		t.Fatalf("expected displayedChat 333, got %d", m.displayedChat)
+	}
+	if got := m.composeInput.Value(); got != "" {
+		t.Fatalf("expected empty draft for C, got %q", got)
+	}
+	if m.chatDrafts[222] != "черновик для B" {
+		t.Fatalf("expected draft %q saved for B, got %q", "черновик для B", m.chatDrafts[222])
+	}
+
+	// Возврат в A — восстанавливается его собственный черновик.
+	m.focus = focusMessages
+	m, _ = updateModel(m, keyRune('i'))
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = updateModel(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = selectChatAt(0) // A (111)
+	if m.displayedChat != 111 {
+		t.Fatalf("expected displayedChat 111, got %d", m.displayedChat)
+	}
+	if got := m.composeInput.Value(); got != "черновик для A" {
+		t.Fatalf("expected draft for A restored, got %q", got)
+	}
+}
+
+// TestMsgPaneInsertLayoutInvariant — единая рамка панели сообщений в
+// Insert-режиме: панель целиком шириной paneW и высотой paneRowHeight,
+// лента+чёрная область поля ввода ТОЧНО заполняют внутреннюю площадь
+// рамки (feedH+composeH == paneRowHeight-paneFrameV), и ни одна строка не
+// оставляет фоновых "дыр" в цвет панели (методика uncoveredCols из 0039).
+func TestMsgPaneInsertLayoutInvariant(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{
+		{100, 30},
+		{60, 20},
+	} {
+		m := testModel(t, []auth.Chat{{ID: 111, Title: "Чат"}})
+		m.displayedChat = 111
+		m.messages = []auth.Message{
+			{ID: 1, SenderName: "Ирина", Text: "привет как дела", Date: 100},
+			{ID: 2, SenderName: "Вы", Text: "нормально", Date: 101, IsOutgoing: true},
+		}
+		m, _ = updateModel(m, tea.WindowSizeMsg{Width: tc.w, Height: tc.h})
+		m.refreshMessagesContent()
+		m.viewport.GotoBottom()
+		m, _ = updateModel(m, keyRune('i'))
+		m.composeInput.SetValue("черновик")
+		m.syncComposeHeight()
+
+		got := m.msgPane()
+		lines := strings.Split(got, "\n")
+		paneW := m.viewport.Width
+		if len(lines) != m.paneRowHeight {
+			t.Fatalf("%dx%d: expected %d rows, got %d", tc.w, tc.h, m.paneRowHeight, len(lines))
+		}
+		for i, l := range lines {
+			if w := lipgloss.Width(l); w != paneW {
+				t.Fatalf("%dx%d row %d: expected width %d, got %d", tc.w, tc.h, i, paneW, w)
+			}
+			if cols := uncoveredCols(l); len(cols) > 0 {
+				t.Fatalf("%dx%d row %d: uncovered columns %v (терминальный фон вместо цвета панели)", tc.w, tc.h, i, cols)
+			}
+		}
+		if m.viewport.Height+m.composeInput.Height() != m.paneRowHeight-paneFrameV {
+			t.Fatalf("%dx%d: invariant broken: feedH(%d)+composeH(%d) != paneRowHeight(%d)-paneFrameV(%d)",
+				tc.w, tc.h, m.viewport.Height, m.composeInput.Height(), m.paneRowHeight, paneFrameV)
+		}
+		// чёрная область поля ввода — последние composeH строк контента рамки,
+		// все несут chromeBackground (0;0;0).
+		feedH := m.viewport.Height
+		for r := 2 + feedH; r < 2+feedH+m.composeInput.Height(); r++ {
+			if !strings.Contains(lines[r], "48;2;0;0;0") {
+				t.Fatalf("%dx%d row %d: compose area must be solid chromeBackground, got %q", tc.w, tc.h, r, lines[r])
+			}
+		}
 	}
 }

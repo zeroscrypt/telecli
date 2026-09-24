@@ -262,3 +262,124 @@ func TestSendMessageUnexpectedResponseType(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+// voiceNoteMsgMap строит голосовое сообщение TDLib (content messageVoiceNote)
+// с указанными id файла и длительностью — для тестов парсинга голосового.
+func voiceNoteMsgMap(fileID float64, duration float64) map[string]interface{} {
+	return map[string]interface{}{
+		"@type":       "message",
+		"id":          float64(1),
+		"is_outgoing": true,
+		"date":        float64(100),
+		"content": map[string]interface{}{
+			"@type":       "messageVoiceNote",
+			"voice_note":  map[string]interface{}{"@type": "voiceNote", "duration": duration, "voice": map[string]interface{}{"@type": "file", "id": fileID, "size": float64(4096)}},
+			"is_listened": false,
+		},
+	}
+}
+
+func TestParseMessageVoiceNoteSetsVoiceFields(t *testing.T) {
+	got := parseMessage(context.Background(), nil, voiceNoteMsgMap(12345, 65))
+	if !got.IsVoiceNote {
+		t.Error("expected IsVoiceNote=true")
+	}
+	if got.VoiceFileID != 12345 {
+		t.Errorf("expected VoiceFileID=12345, got %d", got.VoiceFileID)
+	}
+	if got.VoiceDuration != 65 {
+		t.Errorf("expected VoiceDuration=65, got %d", got.VoiceDuration)
+	}
+	if got.VoiceSize != 4096 {
+		t.Errorf("expected VoiceSize=4096, got %d", got.VoiceSize)
+	}
+	if got.Text != "▶ голосовое [1:05]" {
+		t.Errorf("expected Text %q, got %q", "▶ голосовое [1:05]", got.Text)
+	}
+}
+
+// TestParseMessageVoiceNoteMissingSizeKeepsVoiceNote — file.size может
+// отсутствовать (TDLib не всегда сообщает ожидаемый размер): голосовое всё
+// равно валидно, VoiceSize деградирует в 0 без потери остальных полей.
+func TestParseMessageVoiceNoteMissingSizeKeepsVoiceNote(t *testing.T) {
+	raw := voiceNoteMsgMap(12345, 65)
+	voice := raw["content"].(map[string]interface{})["voice_note"].(map[string]interface{})["voice"].(map[string]interface{})
+	delete(voice, "size")
+
+	got := parseMessage(context.Background(), nil, raw)
+	if !got.IsVoiceNote {
+		t.Fatal("expected IsVoiceNote=true even without voice.size")
+	}
+	if got.VoiceFileID != 12345 || got.VoiceDuration != 65 {
+		t.Errorf("expected id/duration intact, got id=%d dur=%d", got.VoiceFileID, got.VoiceDuration)
+	}
+	if got.VoiceSize != 0 {
+		t.Errorf("expected VoiceSize=0 when size missing, got %d", got.VoiceSize)
+	}
+}
+
+func TestParseMessageNonVoiceKeepsPlaceholder(t *testing.T) {
+	msg := map[string]interface{}{
+		"@type":       "message",
+		"id":          float64(1),
+		"is_outgoing": true,
+		"date":        float64(100),
+		"content": map[string]interface{}{
+			"@type": "messagePhoto",
+			"photo": map[string]interface{}{},
+		},
+	}
+	got := parseMessage(context.Background(), nil, msg)
+	if got.IsVoiceNote {
+		t.Error("expected IsVoiceNote=false for non-voice content")
+	}
+	if got.Text != "[тип сообщения: messagePhoto]" {
+		t.Errorf("expected non-voice placeholder, got %q", got.Text)
+	}
+}
+
+func TestParseMessageDegradedVoiceNoteNoPanic(t *testing.T) {
+	cases := []map[string]interface{}{
+		// вообще нет content
+		{"@type": "message", "id": 1, "is_outgoing": true},
+		// content есть, но voice_note отсутствует
+		{"@type": "message", "is_outgoing": true, "content": map[string]interface{}{"@type": "messageVoiceNote"}},
+		// voice_note есть, но voice отсутствует
+		{"@type": "message", "is_outgoing": true, "content": map[string]interface{}{"@type": "messageVoiceNote", "voice_note": map[string]interface{}{"@type": "voiceNote"}}},
+		// voice есть, но id нечисловой
+		{"@type": "message", "is_outgoing": true, "content": map[string]interface{}{"@type": "messageVoiceNote", "voice_note": map[string]interface{}{"@type": "voiceNote", "voice": map[string]interface{}{"@type": "file", "id": "abc"}}}},
+		// id <= 0 — валидация отсекает
+		{"@type": "message", "is_outgoing": true, "content": map[string]interface{}{"@type": "messageVoiceNote", "voice_note": map[string]interface{}{"@type": "voiceNote", "voice": map[string]interface{}{"@type": "file", "id": 0}}}},
+	}
+	for i, raw := range cases {
+		got := parseMessage(context.Background(), nil, raw)
+		if got.IsVoiceNote {
+			t.Errorf("case %d: expected IsVoiceNote=false, flags set despite broken input", i)
+		}
+		if got.VoiceFileID != 0 || got.VoiceDuration != 0 || got.VoiceSize != 0 {
+			t.Errorf("case %d: expected zero voice fields, got id=%d dur=%d size=%d", i, got.VoiceFileID, got.VoiceDuration, got.VoiceSize)
+		}
+		if got.SenderName != "Вы" {
+			t.Errorf("case %d: expected SenderName Вы, got %q", i, got.SenderName)
+		}
+	}
+}
+
+func TestFormatVoiceDuration(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{
+		{0, "0:00"},
+		{5, "0:05"},
+		{65, "1:05"},
+		{120, "2:00"},
+		{3665, "61:05"},
+		{-10, "0:00"},
+	}
+	for _, c := range cases {
+		if got := formatVoiceDuration(c.in); got != c.want {
+			t.Errorf("formatVoiceDuration(%d)=%q, want %q", c.in, got, c.want)
+		}
+	}
+}

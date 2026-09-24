@@ -242,6 +242,54 @@ func TestParseChatReadOutboxUpdateMissingFields(t *testing.T) {
 	}
 }
 
+func TestParseChatTitleUpdateValid(t *testing.T) {
+	update := map[string]interface{}{
+		"@type":   "updateChatTitle",
+		"chat_id": float64(42),
+		"title":   "Иван Петров",
+	}
+	chatID, title, ok := ParseChatTitleUpdate(update)
+	if !ok {
+		t.Fatal("expected ok == true for valid updateChatTitle")
+	}
+	if chatID != 42 {
+		t.Errorf("expected chatID 42, got %d", chatID)
+	}
+	if title != "Иван Петров" {
+		t.Errorf("expected title \"Иван Петров\", got %q", title)
+	}
+}
+
+func TestParseChatTitleUpdateWrongType(t *testing.T) {
+	update := map[string]interface{}{"@type": "updateAuthorizationState"}
+	if _, _, ok := ParseChatTitleUpdate(update); ok {
+		t.Fatal("expected ok == false for wrong @type")
+	}
+}
+
+func TestParseChatTitleUpdateMissingFields(t *testing.T) {
+	// Нет chat_id.
+	update := map[string]interface{}{"@type": "updateChatTitle", "title": "Иван"}
+	if _, _, ok := ParseChatTitleUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_id missing")
+	}
+	// Нет title.
+	update = map[string]interface{}{"@type": "updateChatTitle", "chat_id": float64(42)}
+	if _, _, ok := ParseChatTitleUpdate(update); ok {
+		t.Fatal("expected ok == false when title missing")
+	}
+	// chat_id не число (int53 в JSON TDLib приходят как float64).
+	update = map[string]interface{}{"@type": "updateChatTitle", "chat_id": "42", "title": "Иван"}
+	if _, _, ok := ParseChatTitleUpdate(update); ok {
+		t.Fatal("expected ok == false when chat_id is not a number")
+	}
+	// title не строка.
+	update = map[string]interface{}{"@type": "updateChatTitle", "chat_id": float64(42), "title": float64(1)}
+	if _, _, ok := ParseChatTitleUpdate(update); ok {
+		t.Fatal("expected ok == false when title is not a string")
+	}
+}
+
 func TestParseUnreadMessageCountUpdateMain(t *testing.T) {
 	update := map[string]interface{}{
 		"@type": "updateUnreadMessageCount",

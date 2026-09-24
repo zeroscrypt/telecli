@@ -26,8 +26,10 @@ type Client struct {
 	chatFolderUpdates      chan map[string]interface{}
 	chatReadInboxUpdates   chan map[string]interface{}
 	chatReadOutboxUpdates  chan map[string]interface{}
+	chatTitleUpdates       chan map[string]interface{}
 	unreadCountUpdates     chan map[string]interface{}
 	unreadChatCountUpdates chan map[string]interface{}
+	fileUpdates            chan map[string]interface{}
 	nextExtra              int64
 	nextExtraMu            sync.Mutex
 	closed                 bool
@@ -58,12 +60,21 @@ func NewClient() *Client {
 		// Апдейты о прочтении своих исходящих сообщений (updateChatReadOutbox)
 		// по частоте аналогичны chatReadInboxUpdates — тот же буфер.
 		chatReadOutboxUpdates: make(chan map[string]interface{}, 20),
+		// updateChatTitle приносит настоящее имя приватного чата ПОСЛЕ
+		// асинхронного резолва собеседника (в момент getChat title может быть
+		// пустым — см. задачу 0045) — по частоте аналогичен
+		// chatReadInboxUpdates, тот же буфер.
+		chatTitleUpdates: make(chan map[string]interface{}, 20),
 		// Агрегаты по спискам чатов (папкам) меняются редко — буфер как у
 		// chatFolderUpdates.
 		unreadCountUpdates: make(chan map[string]interface{}, 5),
 		// Тот же паттерн, что у unreadCountUpdates — агрегат по чатам с
 		// непрочитанным (не по сообщениям), нужен для бейджей папок.
 		unreadChatCountUpdates: make(chan map[string]interface{}, 5),
+		// Апдейты о состоянии файлов (updateFile) приходят в ответ на
+		// изменения файлов, в т.ч. по ходу скачивания голосового —
+		// не частые, буфер по аналогии с chatFolderUpdates.
+		fileUpdates: make(chan map[string]interface{}, 5),
 	}
 	go c.receiveLoop()
 
@@ -174,6 +185,20 @@ func (c *Client) receiveLoop() {
 			continue
 		}
 
+		if updType, ok := resp["@type"].(string); ok && updType == "updateChatTitle" {
+			// Тот же паттерн, что у chatReadOutboxUpdates: неблокирующая
+			// отправка с дропом при переполнении. Реальное имя чата (для
+			// приватных — имя собеседника) приходит этим апдейтом после
+			// асинхронного резолва пользователя; обработчик в TUI заменяет
+			// m.chats[i].Title (задача 0045). До подписки избыточные апдейты
+			// просто отбрасываются.
+			select {
+			case c.chatTitleUpdates <- resp:
+			default:
+			}
+			continue
+		}
+
 		if updType, ok := resp["@type"].(string); ok && updType == "updateUnreadMessageCount" {
 			// Тот же паттерн, что у chatFolderUpdates: неблокирующая отправка
 			// с дропом при переполнении. Сумма непрочитанных СООБЩЕНИЙ по
@@ -193,6 +218,18 @@ func (c *Client) receiveLoop() {
 			// updateUnreadMessageCount).
 			select {
 			case c.unreadChatCountUpdates <- resp:
+			default:
+			}
+			continue
+		}
+
+		if updType, ok := resp["@type"].(string); ok && updType == "updateFile" {
+			// Тот же паттерн, что у chatFolderUpdates: неблокирующая отправка
+			// с дропом при переполнении. Скачивание голосового (задача 0041)
+			// ждёт готовый локальный путь файла через этот канал; до
+			// подписки избыточные апдейты просто отбрасываются.
+			select {
+			case c.fileUpdates <- resp:
 			default:
 			}
 			continue
@@ -361,12 +398,20 @@ func (c *Client) ChatReadOutboxUpdates() <-chan map[string]interface{} {
 	return c.chatReadOutboxUpdates
 }
 
+func (c *Client) ChatTitleUpdates() <-chan map[string]interface{} {
+	return c.chatTitleUpdates
+}
+
 func (c *Client) UnreadCountUpdates() <-chan map[string]interface{} {
 	return c.unreadCountUpdates
 }
 
 func (c *Client) UnreadChatCountUpdates() <-chan map[string]interface{} {
 	return c.unreadChatCountUpdates
+}
+
+func (c *Client) FileUpdates() <-chan map[string]interface{} {
+	return c.fileUpdates
 }
 
 func (c *Client) Close() {

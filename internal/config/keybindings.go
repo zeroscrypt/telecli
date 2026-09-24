@@ -29,6 +29,7 @@ type KeyBindings struct {
 	ShowHelp     []string `toml:"show_help"`
 	DeleteChat   []string `toml:"delete_chat"`
 	About        []string `toml:"about"`
+	PlayVoice    []string `toml:"play_voice"`
 }
 
 func DefaultKeyBindings() KeyBindings {
@@ -51,6 +52,7 @@ func DefaultKeyBindings() KeyBindings {
 		ShowHelp:     []string{"h"},
 		DeleteChat:   []string{"d"},
 		About:        []string{"t"},
+		PlayVoice:    []string{"p"},
 	}
 }
 
@@ -156,6 +158,9 @@ func LoadKeyBindings() (KeyBindings, error) {
 	}
 	if len(fileKeys.About) > 0 {
 		keys.About = fileKeys.About
+	}
+	if len(fileKeys.PlayVoice) > 0 {
+		keys.PlayVoice = fileKeys.PlayVoice
 	}
 	return keys, nil
 }

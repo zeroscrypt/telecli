@@ -53,6 +53,30 @@ func TestGetChatsUsesProvidedChatList(t *testing.T) {
 	}
 }
 
+// TestGetChatsFallsBackToChatIDOnEmptyTitle проверяет, что чат с пустым
+// title (реальный кейс: part chats, пользователи без имени) получает
+// фолбэк-заголовок chat#<id> — та же деградация, что в resolveSearchChat
+// (баг, найденный первой живой проверкой, 0042).
+func TestGetChatsFallsBackToChatIDOnEmptyTitle(t *testing.T) {
+	mock := newMockTDClient()
+	mock.responses = []map[string]interface{}{
+		{"@type": "ok"},
+		{"@type": "chats", "chat_ids": []interface{}{float64(42)}},
+		{"@type": "chat", "chat_id": float64(42), "title": ""},
+	}
+
+	chats, err := GetChats(context.Background(), mock, map[string]interface{}{"@type": "chatListMain"}, 10)
+	if err != nil {
+		t.Fatalf("GetChats failed: %v", err)
+	}
+	if len(chats) != 1 {
+		t.Fatalf("expected 1 chat, got %d", len(chats))
+	}
+	if chats[0].Title != "chat#42" {
+		t.Errorf("expected fallback title 'chat#42' for empty title, got %q", chats[0].Title)
+	}
+}
+
 // TestGetChatsFillsIsGroup проверяет разбор типа чата из ответа getChat:
 // chatTypePrivate/chatTypeSecret → IsGroup=false (операция deleteChatHistory),
 // chatTypeBasicGroup/chatTypeSupergroup → IsGroup=true (операция leaveChat).

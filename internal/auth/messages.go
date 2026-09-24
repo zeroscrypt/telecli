@@ -15,6 +15,11 @@ type Message struct {
 	IsOutgoing bool
 	Date       int64  // unix-время, как пришло от TDLib
 	Text       string // готовый к отображению текст (либо плейсхолдер для не-текстовых типов)
+
+	IsVoiceNote   bool  // true — content имеет тип messageVoiceNote с валидным voice_note.voice.id
+	VoiceFileID   int32 // file.id голосового (для downloadFile) — см. parseMessage
+	VoiceDuration int   // duration в секундах (JSON-ключ без _, см. файл задачи)
+	VoiceSize     int64 // ожидаемый размер файла в байтах (voice_note.voice.size) — для проверки готовности файла на диске перед запуском плеера, см. задачу 0042
 }
 
 // historyRetryDelays — задержки между повторными попытками getChatHistory,
@@ -109,6 +114,13 @@ func parseMessage(ctx context.Context, client TDClientInterface, msgMap map[stri
 		SenderName: resolveSender(ctx, client, msgMap),
 		Text:       messageText(msgMap),
 	}
+	if fileID, dur, size, ok := voiceNoteInfo(msgMap); ok {
+		msg.IsVoiceNote = true
+		msg.VoiceFileID = fileID
+		msg.VoiceDuration = dur
+		msg.VoiceSize = size
+		msg.Text = fmt.Sprintf("▶ голосовое [%s]", formatVoiceDuration(dur))
+	}
 	if id, ok := msgMap["id"].(float64); ok {
 		msg.ID = int64(id)
 	}
@@ -119,6 +131,47 @@ func parseMessage(ctx context.Context, client TDClientInterface, msgMap map[stri
 		msg.Date = int64(date)
 	}
 	return msg
+}
+
+// voiceNoteInfo извлекает голосовое из content (schema сверена с td_api.h,
+// см. файл задачи). ok=false — content не messageVoiceNote или битый:
+// в этом случае используется обычный messageText (плейсхолдер).
+// Возвращаемые значения: file.id, voice_note.duration, file.size (ожидаемый
+// размер в байтах; 0 — если TDLib его не сообщил — допустимый случай).
+func voiceNoteInfo(msg map[string]interface{}) (fileID int32, duration int, size int64, ok bool) {
+	content, ok := msg["content"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, false
+	}
+	if contentType, _ := content["@type"].(string); contentType != "messageVoiceNote" {
+		return 0, 0, 0, false
+	}
+	vn, ok := content["voice_note"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, false
+	}
+	voice, ok := vn["voice"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, false
+	}
+	id, ok := voice["id"].(float64)
+	if !ok || id <= 0 {
+		return 0, 0, 0, false
+	}
+	dur, _ := vn["duration"].(float64)
+	sizeF, _ := voice["size"].(float64)
+	return int32(id), int(dur), int64(sizeF), true
+}
+
+// formatVoiceDuration — продолжительность голосового в "M:SS": минуты без
+// ведущего нуля, секунды всегда двузначными. Часы не обрабатываются
+// (голосовые длиннее часа не встречаются практически; если вдруг — минуты
+// просто больше 60, "87:05" — читаемо).
+func formatVoiceDuration(seconds int) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
 }
 
 // SendMessage отправляет текстовое сообщение в чат chatID и возвращает его

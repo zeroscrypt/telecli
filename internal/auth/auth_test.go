@@ -13,6 +13,7 @@ type mockTDClient struct {
 	responses    []map[string]interface{}
 	authCh       chan map[string]interface{}
 	sendStatusCh chan map[string]interface{}
+	fileCh       chan map[string]interface{}
 	sendCount    int
 	requests     []map[string]interface{}
 }
@@ -21,6 +22,7 @@ func newMockTDClient() *mockTDClient {
 	return &mockTDClient{
 		authCh:       make(chan map[string]interface{}, 10),
 		sendStatusCh: make(chan map[string]interface{}, 10),
+		fileCh:       make(chan map[string]interface{}, 10),
 	}
 }
 
@@ -66,12 +68,20 @@ func (m *mockTDClient) ChatReadOutboxUpdates() <-chan map[string]interface{} {
 	return nil
 }
 
+func (m *mockTDClient) ChatTitleUpdates() <-chan map[string]interface{} {
+	return nil
+}
+
 func (m *mockTDClient) UnreadCountUpdates() <-chan map[string]interface{} {
 	return nil
 }
 
 func (m *mockTDClient) UnreadChatCountUpdates() <-chan map[string]interface{} {
 	return nil
+}
+
+func (m *mockTDClient) FileUpdates() <-chan map[string]interface{} {
+	return m.fileCh
 }
 
 func (m *mockTDClient) Close() {

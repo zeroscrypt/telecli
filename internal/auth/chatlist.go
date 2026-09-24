@@ -66,6 +66,9 @@ func GetChats(ctx context.Context, client TDClientInterface, chatList map[string
 			continue
 		}
 		title, _ := chatResp["title"].(string)
+		if title == "" {
+			title = fmt.Sprintf("chat#%d", int64(chatID))
+		}
 		unreadCount, _ := chatResp["unread_count"].(float64)
 		lastReadOutboxMessageID, _ := chatResp["last_read_outbox_message_id"].(float64)
 		isGroup := false

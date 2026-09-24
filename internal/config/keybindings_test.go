@@ -34,13 +34,14 @@ func TestLoadKeyBindingsPartialOverride(t *testing.T) {
 	_, cleanup := setupKeyBindingsTest(t)
 	defer cleanup()
 
-	writeKeyBindingsFile(t, "quit = [\"x\"]")
+	writeKeyBindingsFile(t, "quit = [\"x\"]\nplay_voice = [\"v\"]")
 
 	keys, err := LoadKeyBindings()
 	require.NoError(t, err)
 
 	defaults := DefaultKeyBindings()
 	require.Equal(t, []string{"x"}, keys.Quit)
+	require.Equal(t, []string{"v"}, keys.PlayVoice)
 	require.Equal(t, defaults.MoveUp, keys.MoveUp)
 	require.Equal(t, defaults.MoveDown, keys.MoveDown)
 	require.Equal(t, defaults.FocusNext, keys.FocusNext)
@@ -95,6 +96,7 @@ search = ["/"]
 show_help = ["h"]
 delete_chat = ["x"]
 about = ["a"]
+play_voice = ["p"]
 `)
 
 	keys, err := LoadKeyBindings()
@@ -119,6 +121,7 @@ about = ["a"]
 		ShowHelp:     []string{"h"},
 		DeleteChat:   []string{"x"},
 		About:        []string{"a"},
+		PlayVoice:    []string{"p"},
 	}
 	require.Equal(t, want, keys)
 }
