@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/zeroscrypt/telecli/compare/v1.3.0...v1.4.0) (2026-09-24)
+
+
+### Features
+
+* inline photo preview in iTerm2, fix voice download race ([ded29e7](https://github.com/zeroscrypt/telecli/commit/ded29e7a934a5598e354e0a82cd3fb4a250a456f))
+
 ## [1.3.0](https://github.com/zeroscrypt/telecli/compare/v1.2.0...v1.3.0) (2026-09-24)
 
 
