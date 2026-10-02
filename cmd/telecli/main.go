@@ -5,19 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"telecli/internal/auth"
 	"telecli/internal/config"
 	"telecli/internal/tdclient"
-	"telecli/internal/tui"
+	"telecli/internal/tgwall"
+	"telecli/internal/update"
 )
 
 // version — версия релиза, задаётся при сборке через
@@ -25,6 +27,11 @@ import (
 // сборка) остаётся "dev" — internal/update.IsNewer трактует "dev" как
 // "не показывать доступное обновление", не как реальный номер версии.
 var version = "dev"
+
+// appName — как приложение называет себя в нижней строке стены. Живёт здесь, а
+// не константой internal/tgwall: имя приходит из точки входа, у которой есть
+// бинарник, и на этом же месте меняется одной строкой, а не правкой пакета.
+var appName = "TELECLi"
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -35,6 +42,7 @@ func main() {
 		},
 	}
 	rootCmd.AddCommand(newSendCmd())
+	rootCmd.AddCommand(newUpdateCmd())
 	// Не печатать usage-подсказку на обычных рантайм-ошибках.
 	rootCmd.SilenceUsage = true
 	// cobra по умолчанию сама печатает "Error: ..." (ErrPrefix) в stderr —
@@ -145,6 +153,146 @@ func runSend(target, messageText, filePath string) error {
 	return nil
 }
 
+func newUpdateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "update",
+		Short: "Скачать и установить последнюю версию telecli",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUpdate()
+		},
+	}
+}
+
+// Таймауты обновления. Проверка релиза — короткий запрос за одной записью JSON,
+// здесь важнее быстро сдаться, чем держать человека перед пустым экраном;
+// скачивание — передача десятков мегабайт, и таймаут взят по прецеденту runSend
+// в этом же файле, где столько же даётся отправке файла (2 минуты там стоят
+// аутентификации, а не передаче файла).
+const (
+	updateCheckTimeout    = 5 * time.Second
+	updateDownloadTimeout = 10 * time.Minute
+)
+
+// updatePlan — что выяснила проверка обновлений и что предстоит сделать. Отдельная
+// структура вместо того, чтобы проверять всё прямо в runUpdate: решение «есть
+// ли обновление, какой ассет качать» не печатает ничего и не трогает диск,
+// поэтому проверяется тестами без сети и без настоящего бинарника (адрес GitHub
+// подменяется на httptest тем же update.SetAPIURLForTest, что и в тестах
+// internal/update).
+type updatePlan struct {
+	// UpToDate — обновляться нечего: стоит уже последняя версия либо эта сборка
+	// вообще не привязана к релизу (version == "dev").
+	UpToDate bool
+	// Version — версия, ради которой обновляемся (тег нового релиза). Осмысленна
+	// только при UpToDate == false.
+	Version string
+	// AssetURL — откуда качать бинарник этой платформы.
+	AssetURL string
+	// ReleaseURL — страница релиза на GitHub. Показывается в ошибках: если
+	// готового бинарника нет, единственное, что можно предложить человеку, —
+	// скачать вручную оттуда.
+	ReleaseURL string
+}
+
+// planUpdate спрашивает у GitHub последний релиз и решает, что делать дальше.
+//
+// currentVersion подставляется снаружи (это main.version), а не читается внутри:
+// проверка «новая ли версия» — единственное место, где сборка сравнивает себя с
+// релизом, и подмена версии в тесте обязана быть видна здесь, а не прятаться
+// внутри функции.
+func planUpdate(ctx context.Context, client *http.Client, currentVersion string) (updatePlan, error) {
+	rel, err := update.CheckLatest(ctx, client, updateCheckTimeout)
+	if err != nil {
+		return updatePlan{}, fmt.Errorf("проверка обновлений: %w", err)
+	}
+	// IsNewer для "dev" всегда false — локальная dev-сборка не привязана к
+	// номеру релиза, сравнивать нечего. Это ожидаемое поведение, а не сбой:
+	// обойти его значило бы притвориться, что dev-сборка старше любого релиза.
+	if !update.IsNewer(currentVersion, rel.TagName) {
+		return updatePlan{UpToDate: true, Version: currentVersion}, nil
+	}
+
+	assetName, ok := update.AssetNameForPlatform()
+	if !ok {
+		return updatePlan{}, fmt.Errorf("готового бинарника для этой платформы нет (%s/%s) — скачайте вручную: %s",
+			runtime.GOOS, runtime.GOARCH, rel.HTMLURL)
+	}
+	asset, ok := update.FindAsset(rel, assetName)
+	if !ok {
+		return updatePlan{}, fmt.Errorf("ассет %q не найден в релизе %s (возможно, сборка для этой платформы не удалась) — скачайте вручную: %s",
+			assetName, rel.TagName, rel.HTMLURL)
+	}
+	return updatePlan{Version: rel.TagName, AssetURL: asset.BrowserDownloadURL, ReleaseURL: rel.HTMLURL}, nil
+}
+
+// upToDateNotice — что сказать, когда обновляться нечего. Отдельная функция
+// ради одного различия, которое видно человеку: у dev-сборки «последняя
+// версия» звучала бы как уверенное утверждение, а на деле версии у неё нет.
+func upToDateNotice(currentVersion string) string {
+	if currentVersion == "dev" {
+		return "Это локальная сборка без номера релиза (dev) — она никогда не считается устаревшей. " +
+			"Чтобы обновления работали, соберите с -ldflags \"-X main.version=vX.Y.Z\"."
+	}
+	return fmt.Sprintf("У вас уже последняя версия: %s", currentVersion)
+}
+
+// executablePath — путь к файлу, который нужно заменить.
+//
+// Симлинки разрешаются ДО InstallBinary, и это не косметика: InstallBinary
+// создаёт временный файл в filepath.Dir(execPath) и переименовывает его в
+// execPath. Без разрешения на пути /usr/local/bin/telecli -> /opt/telecli/bin/telecli
+// переименование заменило бы САМ СИМЛИНК бинарником, и symlink-раскладка
+// (как её делают most-дистрибутивы и brew) перестала бы работать: /opt/telecli
+// остался бы старой версией навсегда. С разрешением заменяется настоящий файл,
+// а ссылка продолжает на него указывать.
+func executablePath() (string, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("определение пути исполняемого файла: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return "", fmt.Errorf("разрешение симлинков исполняемого файла: %w", err)
+	}
+	return resolved, nil
+}
+
+// runUpdate — тело подкоманды `telecli update`: план, скачивание, установка.
+// Вывод разделён намеренно: прогресс идёт в stderr, результат — в stdout, чтобы
+// `telecli update` можно было перенаправить и прочитать только ответ.
+func runUpdate() error {
+	ctx := context.Background()
+
+	fmt.Fprintln(os.Stderr, "Проверка обновлений…")
+	plan, err := planUpdate(ctx, http.DefaultClient, version)
+	if err != nil {
+		return err
+	}
+	if plan.UpToDate {
+		fmt.Fprintln(os.Stdout, upToDateNotice(plan.Version))
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Скачивание %s…\n", plan.Version)
+	data, err := update.DownloadBinary(ctx, http.DefaultClient, plan.AssetURL, updateDownloadTimeout)
+	if err != nil {
+		return fmt.Errorf("скачивание бинарника: %w", err)
+	}
+
+	execPath, err := executablePath()
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(os.Stderr, "Установка…")
+	if err := update.InstallBinary(data, execPath); err != nil {
+		return fmt.Errorf("установка бинарника: %w", err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Обновлено до %s\n", plan.Version)
+	return nil
+}
+
 // validateSendInput проверяет, что задан хотя бы один источник содержимого
 // (-m текст или -f файл) и что указанный файл существует.
 func validateSendInput(messageText, filePath string) error {
@@ -184,96 +332,56 @@ func runTUI() error {
 		return fmt.Errorf("загрузка конфигурации: %w", err)
 	}
 
-	keys, err := config.LoadKeyBindings()
-	if err != nil {
-		return fmt.Errorf("загрузка конфигурации клавиш: %w", err)
-	}
-
-	settings, err := config.LoadSettings()
-	if err != nil {
-		return fmt.Errorf("загрузка настроек: %w", err)
-	}
-
-	// Таймаут 5 минут разумен для интерактивного stdin-диалога аутентификации,
-	// но мал для всей TUI-сессии — на TUI-часть применяется отдельный контекст
-	// без таймаута, отменяемый по выходу из Program.Run().
 	authCtx, authCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer authCancel()
 
 	client := tdclient.NewClient()
 	defer client.Close()
 
+	// Ошибка авторизации — до запуска tea.Program: внутри TUI её некуда показать,
+	// промптер печатает телефон/код/пароль прямо в терминал, и bubbletea с
+	// альт-экраном стёр бы этот вывод.
 	if err := auth.Authenticate(authCtx, client, creds, auth.NewStdinPrompter()); err != nil {
 		return fmt.Errorf("аутентификация: %w", err)
 	}
 
-	// TUI живёт всё время интерактивной сессии — контекст без таймаута,
-	// отменяется после выхода из Program.Run() (предусмотренный вход в
-	// `ctx` нельзя держать «отменённым» между кадрами).
 	tuiCtx, tuiCancel := context.WithCancel(context.Background())
 	defer tuiCancel()
 
-	model := tui.New(client, tuiCtx, keys, settings, version)
+	// Собственный ник аккаунта — рядом с лого. Ника нет — значит не показываем
+	// ничего; сбой getMe — тоже: стена от этого не перестаёт работать, а вот
+	// пустой «@» или выдуманная подпись читались бы как поломка.
+	username, err := auth.GetOwnUsername(tuiCtx, client)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Не удалось получить @ник аккаунта: %v\n", err)
+	}
 
-	// Настройка цветового профиля: если терминал поддерживает truecolor
-	// (COLORTERM=truecolor или 24bit), форсируем профиль в lipgloss.
-	// Это исправляет проблему, когда автоопределение не подхватывает
-	// поддержку truecolor в некоторых окружениях.
-	setupColorProfile()
+	// Раскладка клавиш — из конфигурации, тем же файлом и тем же разделом, что у
+	// остальных интерфейсов: подсказка под полем показывает ровно то, на что стена
+	// реагирует (см. internal/tgwall/keymap.go). Ошибка чтения — до запуска tea,
+	// как и ошибка конфигурации: показать её в TUI негде.
+	keys, err := config.LoadTgwallKeyBindings()
+	if err != nil {
+		return fmt.Errorf("загрузка конфигурации клавиш tgwall: %w", err)
+	}
 
-	// WithMouseCellMotion — без неё колесо мыши не долетает до приложения
-	// как tea.MouseMsg (bubbles/viewport уже умеет прокручивать по колесу
-	// «из коробки», MouseWheelEnabled=true по умолчанию — не хватало только
-	// захвата мыши на уровне Program). Без захвата некоторые терминалы/
-	// мультиплексоры (например, tmux без mouse-режима у самого приложения)
-	// откатываются на собственную прокрутку истории поверх alt-screen,
-	// из-за чего видно вывод, который был в консоли до запуска.
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Настройки нужны стене ради сохранённого фильтра источников (что показывать):
+	// без него стена открывалась бы в режиме «видно всё» и каждый раз теряла бы
+	// выбор человека. Файл настроек не про секреты и не про клавиш, отдельной
+	// ошибки у него нет — дефолты при недоступном файле означают «показать всё»,
+	// то есть ровно то, что стена делала до фильтра.
+	settings, err := config.LoadSettings()
+	if err != nil {
+		return fmt.Errorf("загрузка настроек tgwall: %w", err)
+	}
+
+	model := tgwall.New(tuiCtx, client, username, keys, settings, appName, version)
+
+	// Альт-экран и режим мыши в v2 — поля View, а не опции программы: их
+	// выставляет View() модели. Контекст остался программной опцией.
+	program := tea.NewProgram(model, tea.WithContext(tuiCtx))
 	if _, err := program.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
 	}
 	return nil
-}
-
-// setupColorProfile настраивает цветовой профиль lipgloss на основе
-// переменных окружения. Если терминал декларирует поддержку truecolor
-// (COLORTERM=truecolor или COLORTERM=24bit), форсируем профиль TrueColor.
-// Не форсируем слепо для всех терминалов — если COLORTERM не установлен
-// или TERM не подразумевает truecolor, оставляем автоопределение
-// (корректная деградация до 256/16 цветов — ожидаемое поведение).
-func setupColorProfile() {
-	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
-	term := os.Getenv("TERM")
-
-	switch colorTerm {
-	case "truecolor", "24bit":
-		// Дополнительная проверка для screen/tmux: screen не поддерживает
-		// truecolor, tmux — поддерживает. TERM_PROGRAM=tmux указывает на tmux.
-		if strings.HasPrefix(term, "screen") && os.Getenv("TERM_PROGRAM") != "tmux" {
-			// screen без tmux — только ANSI256
-			return
-		}
-		lipgloss.SetColorProfile(termenv.TrueColor)
-	case "yes", "true":
-		// Явный запрос на цвет, но не truecolor — оставляем автоопределение
-		// (обычно даст ANSI256)
-		return
-	}
-
-	// Дополнительная эвристика: известные терминалы с встроенной поддержкой truecolor
-	// даже без COLORTERM (как в termenv).
-	trueColorTerms := []string{
-		"alacritty",
-		"contour",
-		"rio",
-		"wezterm",
-		"xterm-ghostty",
-		"xterm-kitty",
-	}
-	for _, t := range trueColorTerms {
-		if term == t {
-			lipgloss.SetColorProfile(termenv.TrueColor)
-			return
-		}
-	}
 }

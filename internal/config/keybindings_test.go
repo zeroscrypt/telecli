@@ -99,6 +99,9 @@ delete_chat = ["x"]
 about = ["a"]
 play_voice = ["v"]
 preview_photo = ["f"]
+reply = ["z"]
+delete_message = ["ctrl+y"]
+new_line = ["ctrl+n"]
 `)
 
 	keys, err := LoadKeyBindings()
@@ -125,6 +128,10 @@ preview_photo = ["f"]
 		About:        []string{"a"},
 		PlayVoice:    []string{"v"},
 		PreviewPhoto: []string{"f"},
+		Reply:        []string{"z"},
+		// Поле, которого раньше не было, читается так же, как остальные.
+		DeleteMessage: []string{"ctrl+y"},
+		NewLine:       []string{"ctrl+n"},
 	}
 	require.Equal(t, want, keys)
 }
@@ -147,6 +154,141 @@ func TestLoadKeyBindingsUnreadableFileReturnsError(t *testing.T) {
 	defer SetKeyBindingsPathForTest("")
 
 	_, err := LoadKeyBindings()
+	require.Error(t, err)
+}
+
+// Секция [tgwall] — третий набор клавиш проекта (задача 0158). Проверяется и то,
+// что он читается, и то, что остальные секции файла на него не влияют: один
+// keybindings.toml на три интерфейса, и смешивание наборов было бы тихой поломкой
+// (лента и стена выглядят похоже, а ведут себя по-разному).
+
+func TestLoadTgwallKeyBindingsNoFileReturnsDefaults(t *testing.T) {
+	_, cleanup := setupKeyBindingsTest(t)
+	defer cleanup()
+
+	keys, err := LoadTgwallKeyBindings()
+	require.NoError(t, err)
+	require.Equal(t, DefaultTgwallKeyBindings(), keys)
+}
+
+func TestLoadTgwallKeyBindingsPartialOverride(t *testing.T) {
+	_, cleanup := setupKeyBindingsTest(t)
+	defer cleanup()
+
+	writeKeyBindingsFile(t, "[tgwall]\nmove_down = [\"j\"]\n")
+
+	keys, err := LoadTgwallKeyBindings()
+	require.NoError(t, err)
+
+	defaults := DefaultTgwallKeyBindings()
+	require.Equal(t, []string{"j"}, keys.MoveDown)
+	require.Equal(t, defaults.MoveUp, keys.MoveUp)
+	require.Equal(t, defaults.PageUp, keys.PageUp)
+	require.Equal(t, defaults.PageDown, keys.PageDown)
+	require.Equal(t, defaults.FocusNext, keys.FocusNext)
+	require.Equal(t, defaults.Select, keys.Select)
+	require.Equal(t, defaults.Back, keys.Back)
+	require.Equal(t, defaults.DeleteMessage, keys.DeleteMessage)
+	require.Equal(t, defaults.Reply, keys.Reply)
+	// Toggle перечислен наравне с остальными: забытое в списке поле молча
+	// возвращалось бы к дефолту, и такая опечатка в проверке проходила бы незамеченной.
+	require.Equal(t, defaults.Filter, keys.Filter)
+	require.Equal(t, defaults.Toggle, keys.Toggle)
+	require.Equal(t, defaults.Quit, keys.Quit)
+}
+
+func TestLoadTgwallKeyBindingsEmptyFieldFallsBackToDefault(t *testing.T) {
+	_, cleanup := setupKeyBindingsTest(t)
+	defer cleanup()
+
+	writeKeyBindingsFile(t, "[tgwall]\nselect = []\nquit = [\"ctrl+q\"]\n")
+
+	keys, err := LoadTgwallKeyBindings()
+	require.NoError(t, err)
+
+	defaults := DefaultTgwallKeyBindings()
+	require.Equal(t, []string{"ctrl+q"}, keys.Quit)
+	require.Equal(t, defaults.Select, keys.Select)
+	require.Equal(t, defaults.Toggle, keys.Toggle)
+}
+
+func TestLoadTgwallKeyBindingsFullOverride(t *testing.T) {
+	_, cleanup := setupKeyBindingsTest(t)
+	defer cleanup()
+
+	writeKeyBindingsFile(t, `
+[tgwall]
+move_up = ["k", "up"]
+move_down = ["j", "down"]
+page_up = ["ctrl+b"]
+page_down = ["ctrl+f"]
+focus_next = ["tab"]
+focus_prev = ["ctrl+p"]
+select = ["ctrl+m"]
+back = ["ctrl+g"]
+delete_message = ["ctrl+d"]
+reply = ["r"]
+filter = ["ctrl+o"]
+toggle = ["ctrl+t"]
+quit = ["ctrl+x"]
+
+[tgcli]
+move_up = ["q"]
+quit = ["ctrl+q"]
+`)
+
+	keys, err := LoadTgwallKeyBindings()
+	require.NoError(t, err)
+
+	want := TgwallKeyBindings{
+		MoveUp:        []string{"k", "up"},
+		MoveDown:      []string{"j", "down"},
+		PageUp:        []string{"ctrl+b"},
+		PageDown:      []string{"ctrl+f"},
+		FocusNext:     []string{"tab"},
+		FocusPrev:     []string{"ctrl+p"},
+		Select:        []string{"ctrl+m"},
+		Back:          []string{"ctrl+g"},
+		DeleteMessage: []string{"ctrl+d"},
+		Reply:         []string{"r"},
+		Filter:        []string{"ctrl+o"},
+		Toggle:        []string{"ctrl+t"},
+		Quit:          []string{"ctrl+x"},
+		// Панели переписки в файле не заданы, и их дефолты (ctrl+1 и ctrl+2)
+		// обязаны доехать из настроек по умолчанию: пустая секция — это «не задано»,
+		// а не «панелей нет».
+		OpenPanel1: []string{"ctrl+1"},
+		OpenPanel2: []string{"ctrl+2"},
+	}
+	require.Equal(t, want, keys)
+
+	// Соседняя секция [tgcli] не должна подмешиваться в набор стены: у ленты свои
+	// действия и свои клавиши, и наборы не связаны.
+	tgcli, err := LoadTgcliKeyBindings()
+	require.NoError(t, err)
+	require.Equal(t, []string{"q"}, tgcli.MoveUp)
+	require.Equal(t, []string{"ctrl+q"}, tgcli.Quit)
+	require.Equal(t, []string{"down"}, tgcli.MoveDown)
+}
+
+func TestLoadTgwallKeyBindingsInvalidTOMLReturnsError(t *testing.T) {
+	_, cleanup := setupKeyBindingsTest(t)
+	defer cleanup()
+
+	writeKeyBindingsFile(t, "[tgwall]\nmove_up = [\nnot valid toml")
+
+	_, err := LoadTgwallKeyBindings()
+	require.Error(t, err)
+}
+
+func TestLoadTgwallKeyBindingsUnreadableFileReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "keybindings.toml")
+	require.NoError(t, os.MkdirAll(dir, 0700))
+	SetKeyBindingsPathForTest(dir)
+	defer SetKeyBindingsPathForTest("")
+
+	_, err := LoadTgwallKeyBindings()
 	require.Error(t, err)
 }
 

@@ -86,8 +86,21 @@ type TDClientInterface interface {
 	ChatReadInboxUpdates() <-chan map[string]interface{}
 	ChatReadOutboxUpdates() <-chan map[string]interface{}
 	ChatTitleUpdates() <-chan map[string]interface{}
+	ChatNotificationSettingsUpdates() <-chan map[string]interface{}
 	UnreadCountUpdates() <-chan map[string]interface{}
 	UnreadChatCountUpdates() <-chan map[string]interface{}
+	MessageInteractionUpdates() <-chan map[string]interface{}
+	UnreadReactionMessageUpdates() <-chan map[string]interface{}
+	DeleteMessagesUpdates() <-chan map[string]interface{}
+	MessageContentUpdates() <-chan map[string]interface{}
+	NewChatUpdates() <-chan map[string]interface{}
+	ChatAddedToListUpdates() <-chan map[string]interface{}
+	ChatRemovedFromListUpdates() <-chan map[string]interface{}
+	ChatPositionUpdates() <-chan map[string]interface{}
+	ConnectionStateUpdates() <-chan map[string]interface{}
+	UserUpdates() <-chan map[string]interface{}
+	GroupMemberCountUpdates() <-chan map[string]interface{}
+	UserStatusUpdates() <-chan map[string]interface{}
 	Close()
 }
 
@@ -177,6 +190,14 @@ func Authenticate(ctx context.Context, client TDClientInterface, creds config.Cr
 				return errors.New("tdlib: authorization closed unexpectedly")
 
 			default:
+				// Любое другое состояние (сейчас это 5 классов authorizationStateWait* из
+				// td_api.h — WaitRegistration, WaitEmailAddress, WaitEmailCode,
+				// WaitOtherDeviceConfirmation, WaitPremiumPurchase, а также всё, что TDLib
+				// добавит в будущем) раньше молча игнорировалось, и цикл вешался на чтении
+				// AuthUpdates() без единого сообщения. Явная ошибка с именем состояния —
+				// строго лучше: она называет проблему и сохраняет покрытие будущих состояний
+				// без добавления веток по одной на каждое.
+				return fmt.Errorf("tdlib: неподдерживаемый шаг авторизации %q — попробуйте другой аккаунт или другой способ входа", stateType)
 			}
 
 		case <-ctx.Done():

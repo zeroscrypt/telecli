@@ -109,7 +109,11 @@ func TestParseNewMessageUpdateWrongType(t *testing.T) {
 	if ok {
 		t.Fatal("expected ok == false for wrong @type")
 	}
-	if chatID != 0 || msg != (Message{}) {
+	// Сравнение по полям, а не msg != (Message{}): в Message лежит срез
+	// Reactions, а срезы не сравниваются оператором ==, поэтому сравнение
+	// структуры целиком после появления реакций просто не компилируется. Поля
+	// взяты те же, что и в тесте выше, — проверяется полная пустота.
+	if chatID != 0 || msg.ID != 0 || msg.SenderName != "" || msg.Text != "" || msg.Reactions != nil {
 		t.Errorf("expected zero value on failure, got chatID=%d msg=%+v", chatID, msg)
 	}
 }
@@ -472,5 +476,250 @@ func TestParseUnreadChatCountUpdateMissingFields(t *testing.T) {
 	}
 	if _, _, ok := ParseUnreadChatCountUpdate(update); ok {
 		t.Fatal("expected ok == false when chat_folder_id missing")
+	}
+}
+
+// TestParseChatNotificationSettingsUpdate — апдейт о заглушении разбирается в обе
+// стороны: заглушили и разглушили, плюс чужой @type и битые поля. Ошибки здесь
+// стоили бы тихой потери переписки: чат, признанный непригодным, просто исчез бы
+// из ленты при включённом фильтре.
+func TestParseChatNotificationSettingsUpdate(t *testing.T) {
+	muted := map[string]interface{}{
+		"use_default_mute_for": false,
+		"mute_for":             float64(604800),
+	}
+	unmuted := map[string]interface{}{
+		"use_default_mute_for": false,
+		"mute_for":             float64(0),
+	}
+	cases := []struct {
+		name   string
+		update map[string]interface{}
+		wantID int64
+		want   bool
+		wantOK bool
+	}{
+		{
+			name: "заглушили",
+			update: map[string]interface{}{
+				"@type":                 "updateChatNotificationSettings",
+				"chat_id":               float64(42),
+				"notification_settings": muted,
+			},
+			wantID: 42, want: true, wantOK: true,
+		},
+		{
+			name: "разглушили",
+			update: map[string]interface{}{
+				"@type":                 "updateChatNotificationSettings",
+				"chat_id":               float64(42),
+				"notification_settings": unmuted,
+			},
+			wantID: 42, want: false, wantOK: true,
+		},
+		{
+			name: "дефолтная настройка типа чата",
+			update: map[string]interface{}{
+				"@type":                 "updateChatNotificationSettings",
+				"chat_id":               float64(7),
+				"notification_settings": map[string]interface{}{"use_default_mute_for": true},
+			},
+			wantID: 7, want: false, wantOK: true,
+		},
+		{
+			name: "чужой @type",
+			update: map[string]interface{}{
+				"@type":   "updateChatTitle",
+				"chat_id": float64(42),
+			},
+			wantOK: false,
+		},
+		{
+			name:   "нет chat_id",
+			update: map[string]interface{}{"@type": "updateChatNotificationSettings"},
+			wantOK: false,
+		},
+		{
+			// Настройки потерялись, но апдейт всё равно опознан: чат надо показать,
+			// а не молча спрятать из-за неполного объекта.
+			name: "нет notification_settings",
+			update: map[string]interface{}{
+				"@type":   "updateChatNotificationSettings",
+				"chat_id": float64(42),
+			},
+			wantID: 42, want: false, wantOK: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			chatID, gotMuted, ok := ParseChatNotificationSettingsUpdate(testCase.update)
+			if ok != testCase.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, testCase.wantOK)
+			}
+			if !testCase.wantOK {
+				return
+			}
+			if chatID != testCase.wantID {
+				t.Errorf("chat_id = %d, want %d", chatID, testCase.wantID)
+			}
+			if gotMuted != testCase.want {
+				t.Errorf("muted = %v, want %v", gotMuted, testCase.want)
+			}
+		})
+	}
+}
+
+// TestParseUserUpdate — переименование разбирается во всех формах, которые
+// приносит TDLib, и отбрасывается на чужом апдейте.
+//
+// Отдельный контракт здесь один: апдейт несёт объект user ЦЕЛИКОМ, а не только
+// изменившиеся поля, поэтому в нём есть и id, и имена. Проверяются все три формы
+// имени плюс фолбэк «user#<id>» для пользователя без имени — он обязан совпадать
+// с тем, что показывается у карточек, разобранных при загрузке истории, иначе
+// переименованный человек получил бы в ленте другое написание, чем его же старые
+// сообщения.
+func TestParseUserUpdate(t *testing.T) {
+	cases := []struct {
+		name     string
+		update   map[string]interface{}
+		wantID   int64
+		wantName string
+		wantOK   bool
+	}{
+		{
+			name: "оба имени",
+			update: map[string]interface{}{
+				"@type": "updateUser",
+				"user": map[string]interface{}{
+					"@type": "user", "id": float64(42), "first_name": "Иван", "last_name": "Петров",
+				},
+			},
+			wantID: 42, wantName: "Иван Петров", wantOK: true,
+		},
+		{
+			name: "только имя",
+			update: map[string]interface{}{
+				"@type": "updateUser",
+				"user": map[string]interface{}{
+					"@type": "user", "id": float64(7), "first_name": "Анна", "last_name": "",
+				},
+			},
+			wantID: 7, wantName: "Анна", wantOK: true,
+		},
+		{
+			// Удалённый аккаунт без имён: показывать нечего, кроме сырого id —
+			// ровно как у карточек, разобранных раньше.
+			name: "без имён",
+			update: map[string]interface{}{
+				"@type": "updateUser",
+				"user": map[string]interface{}{
+					"@type": "user", "id": float64(9), "first_name": "", "last_name": "",
+				},
+			},
+			wantID: 9, wantName: "user#9", wantOK: true,
+		},
+		{
+			name: "чужой @type",
+			update: map[string]interface{}{
+				"@type": "updateChatTitle",
+				"user":  map[string]interface{}{"@type": "user", "id": float64(42)},
+			},
+			wantOK: false,
+		},
+		{
+			name:   "нет объекта user",
+			update: map[string]interface{}{"@type": "updateUser"},
+			wantOK: false,
+		},
+		{
+			name:   "user не объект",
+			update: map[string]interface{}{"@type": "updateUser", "user": "Иван"},
+			wantOK: false,
+		},
+		{
+			// Без id искать нечего: переименовать некого, и молча сопоставить
+			// апдейт первому попавшемуся было бы хуже, чем проигнорировать его.
+			name: "у user нет id",
+			update: map[string]interface{}{
+				"@type": "updateUser",
+				"user":  map[string]interface{}{"@type": "user", "first_name": "Иван"},
+			},
+			wantOK: false,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			userID, name, _, ok := ParseUserUpdate(testCase.update)
+			if ok != testCase.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, testCase.wantOK)
+			}
+			if !testCase.wantOK {
+				if userID != 0 || name != "" {
+					t.Errorf("на неопознанном апдейте вернулось %d/%q, want 0 и пусто", userID, name)
+				}
+				return
+			}
+			if userID != testCase.wantID {
+				t.Errorf("userID = %d, want %d", userID, testCase.wantID)
+			}
+			if name != testCase.wantName {
+				t.Errorf("name = %q, want %q", name, testCase.wantName)
+			}
+		})
+	}
+}
+
+// TestParseUserUpdateNameMatchesMessageSenderResolve — переименование и разбор
+// истории обязаны давать ОДНО и то же написание имени.
+//
+// Оба пути берут имя из одного объекта user, но проверяется это именно здесь, а
+// не на глаз: разъехавшиеся правила (например, «user#<id>» в одном месте и
+// пустая строка в другом) выглядели бы правдоподобно, и расхождение вылезло бы
+// в ленте как «у карточек одно имя, у обновлённых другое».
+func TestParseUserUpdateNameMatchesMessageSenderResolve(t *testing.T) {
+	cases := []struct {
+		name string
+		user map[string]interface{}
+	}{
+		{
+			name: "оба имени",
+			user: map[string]interface{}{"@type": "user", "id": float64(42), "first_name": "Иван", "last_name": "Петров"},
+		},
+		{
+			name: "только имя",
+			user: map[string]interface{}{"@type": "user", "id": float64(42), "first_name": "Анна"},
+		},
+		{
+			name: "без имён",
+			user: map[string]interface{}{"@type": "user", "id": float64(42)},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, updatedName, _, ok := ParseUserUpdate(map[string]interface{}{
+				"@type": "updateUser", "user": testCase.user,
+			})
+			if !ok {
+				t.Fatal("ParseUserUpdate вернул ok = false на валидном апдейте")
+			}
+
+			// Тот же объект user, но пришедший ответом на getUser при разборе
+			// входящего сообщения.
+			mock := newMockTDClient()
+			mock.responses = []map[string]interface{}{testCase.user}
+			message := parseMessage(context.Background(), mock, map[string]interface{}{
+				"@type":       "message",
+				"id":          float64(1),
+				"is_outgoing": false,
+				"sender_id":   map[string]interface{}{"@type": "messageSenderUser", "user_id": float64(42)},
+			})
+
+			if message.SenderName != updatedName {
+				t.Errorf("имя разошлось: карточка %q, updateUser %q", message.SenderName, updatedName)
+			}
+			if message.SenderUserID != 42 {
+				t.Errorf("SenderUserID = %d, want 42 — по нему карточка и обновляется", message.SenderUserID)
+			}
+		})
 	}
 }
