@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/zeroscrypt/telecli/compare/v1.4.0...v2.0.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* единый TUI — стена вместо старого интерфейса
+
+### Features
+
+* единый TUI — стена вместо старого интерфейса ([5da2e1d](https://github.com/zeroscrypt/telecli/commit/5da2e1d0feee56ad551b3e979ed2dd1a69b47c23))
+
 ## [1.4.0](https://github.com/zeroscrypt/telecli/compare/v1.3.0...v1.4.0) (2026-09-24)
 
 
